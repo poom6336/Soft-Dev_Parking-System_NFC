@@ -1,6 +1,9 @@
 'use client';
 
+// @ts-expect-error - promptpay-qr has no types
+import generatePayload from 'promptpay-qr';
 import React, { useState, useEffect, Suspense } from 'react';
+import mqtt from 'mqtt';
 import { useSearchParams } from 'next/navigation';
 import { QRCodeSVG } from 'qrcode.react';
 import { 
@@ -67,11 +70,31 @@ function PaymentContent() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  const handleCopyPromptPay = () => {
-    navigator.clipboard.writeText(`00020101021229370016A000000677010111031500000000000005802TH5303764540${amount}.005802TH6304`);
+  const handleCopyPromptPay = async () => {
+  const textToCopy = `00020101021229370016A000000677010111031500000000000005802TH5303764540${amount}.00580...`; // ใช้สตริงเดิมของคุณ
+
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(textToCopy);
+    } else {
+      // Fallback สำหรับ HTTP / IP ในวง LAN (192.168.1.167)
+      const textArea = document.createElement("textarea");
+      textArea.value = textToCopy;
+      textArea.style.position = "fixed";
+      textArea.style.left = "-999999px";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      document.execCommand("copy");
+      textArea.remove();
+    }
+
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
-  };
+  } catch (err) {
+    console.error("Failed to copy text: ", err);
+  }
+};
 
   const handleExtendGracePeriod = () => {
     if (!extendedTime) {

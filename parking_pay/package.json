@@ -11,7 +11,9 @@
   "dependencies": {
     "framer-motion": "^13.3.0",
     "lucide-react": "^1.46.0",
+    "mqtt": "^5.16.0",
     "next": "16.3.5",
+    "promptpay-qr": "^0.5.0",
     "qrcode.react": "^4.2.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
