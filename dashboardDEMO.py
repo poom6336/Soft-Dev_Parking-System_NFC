@@ -65,7 +65,7 @@ class ParkingDashboard(QMainWindow):
         self.parking.create_tables()
 
         #demo db
-        self.parking.register_member('A1B2C3D4', 'กท-1234')
+        self.parking.register_member('A1B2C3D4', 'กท-2058')
         self.parking.register_member('E5F6G7H8', 'สข-9999', 'vip')
 
         self.setWindowTitle("SMART PARKING TERMINAL")
@@ -189,7 +189,7 @@ class ParkingDashboard(QMainWindow):
         self.log_text.setFont(QFont("Consolas", 10))
 
         btn_layout = QHBoxLayout()
-        btn_scan_car1 = QPushButton("Scan: กท-1234")
+        btn_scan_car1 = QPushButton("Scan: กท-2058")
         btn_scan_car1.setStyleSheet("background-color: #CBA6F7;")
         btn_scan_car1.clicked.connect(lambda: self.simulate_scan('A1B2C3D4'))
 

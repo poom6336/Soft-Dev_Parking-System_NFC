@@ -8,6 +8,8 @@ import threading
 import serial
 from adafruit_pn532.uart import PN532_UART
 import easyocr
+import numpy as np
+from PIL import Image, ImageFont, ImageDraw
 
 class ParkingSys:
     def __init__(self, db_name='parking.db'):
@@ -125,7 +127,6 @@ class ParkingSys:
             return "Camera is not ready"
 
         height, width, _ = frame.shape
-        
         y_start = int(height * 0.4)
         y_end = int(height * 0.9)
         x_start = int(width * 0.2)
@@ -133,27 +134,25 @@ class ParkingSys:
 
         roi_frame = frame[y_start:y_end, x_start:x_end]
         gray_roi = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        blur_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
+        _, thresh_roi = cv2.threshold(blur_roi, 100, 255, cv2.THRESH_BINARY)
         
-        detected_texts = self.alpr_reader.readtext(gray_roi, detail=0)
+        detected_texts = self.alpr_reader.readtext(thresh_roi, detail=0)
 
-        plate_found = False
-        alpr_result_text = ""
+        clean_db_plate = license_plate.replace("-", "").replace(" ", "")
+        alpr_combined = "".join(detected_texts).replace("-", "").replace(" ", "")
+        alpr_raw_text = " ".join(detected_texts) # เก็บข้อความดิบไว้โชว์บนหน้าจอ
 
-        for text in detected_texts:
-            text = text.replace(" ", "")
-            if len(text) >= 2:
-                plate_found = True
-                alpr_result_text += text + " "
-
-        cv2.rectangle(frame, (x_start, y_start), (x_end, y_end), (0, 0, 255), 2)
-        cv2.putText(frame, "ALPR ZONE", (x_start, y_start - 10), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-
-        if not plate_found:
-            return f"Access denied\nReason: no license detected"
+        if clean_db_plate not in alpr_combined:
+            cv2.rectangle(frame, (x_start, y_start), (x_end, y_end), (0, 0, 255), 2)
+            
+            return (f"[DENIED] Access denied\n"
+                    f"License not found or not registered\n"
+                    f"In system: {license_plate} | Read found: '{alpr_raw_text}'")
         
+        cv2.rectangle(frame, (x_start, y_start), (x_end, y_end), (0, 255, 0), 2)
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-
+        
         self.cursor.execute('''
             INSERT INTO parking_logs (uid, time_in, status)
             VALUES (?, ?, 'parked')
@@ -161,20 +160,15 @@ class ParkingSys:
         self.conn.commit()
 
         log_id = self.cursor.lastrowid
-
-        #capture img
+        
+        #Save image
         img_path = self._save_image_with_overlay(frame, log_id, license_plate)
         if img_path:
-            self.cursor.execute('''
-                UPDATE parking_logs
-                SET image_path = ?
-                WHERE log_id = ?
-            ''', (img_path, log_id))
+            self.cursor.execute('UPDATE parking_logs SET image_path = ? WHERE log_id = ?', (img_path, log_id))
             self.conn.commit()
 
         return (f"[ENTRY]\n"
-                f"License in system: {license_plate}\n"
-                f"ALPR found: {alpr_result_text}\n"
+                f"License detect: {license_plate}\n"
                 f"Time: {now}")
 
     def _process_exit(self, log_id):
@@ -251,20 +245,27 @@ class ParkingSys:
         self.conn.close()
 
     def _save_image_with_overlay(self, frame, log_id, license_plate):
-        """ ฟังก์ชันสำหรับเซฟรูปที่แคปเจอร์มาแล้ว พร้อมเขียนข้อความทับ """
-        
         if not os.path.exists("parking_images"):
             os.makedirs("parking_images")
 
-        frame_copy = frame.copy()
-        
         timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         text = f"{license_plate} | {timestamp}"
 
-        cv2.putText(frame_copy, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-                    1, (0, 255, 0), 2, cv2.LINE_AA)
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        pil_im = Image.fromarray(frame_rgb)
+        draw = ImageDraw.Draw(pil_im)
+
+        # (For Mac/Linux use other font Ex: "Sarabun-Regular.ttf")
+        try:
+            font = ImageFont.truetype("tahoma.ttf", 30)
+        except IOError:
+            font = ImageFont.load_default()
+            print("No Tahoma font found")
+
+        draw.text((10, 30), text, font=font, fill=(0, 255, 0))
+        frame_with_text = cv2.cvtColor(np.array(pil_im), cv2.COLOR_RGB2BGR)
         filename = f"parking_images/entry_{log_id}.jpg"
-        cv2.imwrite(filename, frame_copy)
+        cv2.imwrite(filename, frame_with_text)
         
         return filename
 
@@ -331,6 +332,6 @@ if __name__ == "__main__":
     parking = ParkingSys('parking.db')
     parking.create_tables()
     
-    parking.register_member('A1B2C3D4', 'กท-1234')
+    parking.register_member('A1B2C3D4', 'กท-2058')
     uid_from_nfc = 'A1B2C3D4'
     parking.handle_scan(uid_from_nfc)
