@@ -123,7 +123,18 @@ class ParkingSys:
         frame = self.camera.read()
         if frame is None:
             return "Camera is not ready"
-        detected_texts = self.alpr_reader.readtext(frame, detail=0)
+
+        height, width, _ = frame.shape
+        
+        y_start = int(height * 0.4)
+        y_end = int(height * 0.9)
+        x_start = int(width * 0.2)
+        x_end = int(width * 0.8)
+
+        roi_frame = frame[y_start:y_end, x_start:x_end]
+        gray_roi = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        
+        detected_texts = self.alpr_reader.readtext(gray_roi, detail=0)
 
         plate_found = False
         alpr_result_text = ""
@@ -133,6 +144,10 @@ class ParkingSys:
             if len(text) >= 2:
                 plate_found = True
                 alpr_result_text += text + " "
+
+        cv2.rectangle(frame, (x_start, y_start), (x_end, y_end), (0, 0, 255), 2)
+        cv2.putText(frame, "ALPR ZONE", (x_start, y_start - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
         if not plate_found:
             return f"Access denied\nReason: no license detected"
@@ -148,7 +163,7 @@ class ParkingSys:
         log_id = self.cursor.lastrowid
 
         #capture img
-        img_path = self._capture_car_image(frame,log_id, license_plate)
+        img_path = self._save_image_with_overlay(frame, log_id, license_plate)
         if img_path:
             self.cursor.execute('''
                 UPDATE parking_logs
@@ -234,6 +249,24 @@ class ParkingSys:
     def close(self):
         self.camera.stop()
         self.conn.close()
+
+    def _save_image_with_overlay(self, frame, log_id, license_plate):
+        """ ฟังก์ชันสำหรับเซฟรูปที่แคปเจอร์มาแล้ว พร้อมเขียนข้อความทับ """
+        
+        if not os.path.exists("parking_images"):
+            os.makedirs("parking_images")
+
+        frame_copy = frame.copy()
+        
+        timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        text = f"{license_plate} | {timestamp}"
+
+        cv2.putText(frame_copy, text, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
+                    1, (0, 255, 0), 2, cv2.LINE_AA)
+        filename = f"parking_images/entry_{log_id}.jpg"
+        cv2.imwrite(filename, frame_copy)
+        
+        return filename
 
 
 
