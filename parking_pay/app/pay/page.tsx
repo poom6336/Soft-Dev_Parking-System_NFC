@@ -9,7 +9,7 @@ import { QRCodeSVG } from 'qrcode.react';
 import { 
   CheckCircle2, Clock, CreditCard, AlertCircle, RefreshCw, 
   Car, Nfc, ShieldCheck, History, Camera, ArrowRight, Lock, 
-  Copy, Download, MapPin, Receipt, Check, PhoneCall, HelpCircle, AlertTriangle
+  Copy, Download, MapPin, Receipt, Check, PhoneCall, HelpCircle, AlertTriangle, Calendar
 } from 'lucide-react';
 
 function PaymentContent() {
@@ -19,35 +19,28 @@ function PaymentContent() {
   const zone = searchParams.get('zone') || 'ชั้น 2 - โซน B14';
 
   const [status, setStatus] = useState<'parked' | 'paying' | 'success' | 'receipt' | 'sos'>('parked');
-  const [payCountdown, setPayCountdown] = useState(300); // 5 นาทีสำหรับจ่ายเงิน
-  const [exitCountdown, setExitCountdown] = useState(900); // 15 นาทีสำหรับขับออก
+  const [payCountdown, setPayCountdown] = useState(300);
+  const [exitCountdown, setExitCountdown] = useState(900);
   const [entryTime, setEntryTime] = useState<string | null>(null);
+  const [entryImage, setEntryImage] = useState<string | null>(null); // <--- State สำหรับเก็บรูปกล้องจริง
   const [parkedSeconds, setParkedSeconds] = useState(0);
   const [copied, setCopied] = useState(false);
   const [extendedTime, setExtendedTime] = useState(false);
   const [showBreakdown, setShowBreakdown] = useState(false);
 
-  // คำนวณค่าบริการ (อย่างน้อย 1 ชั่วโมง)
   const hoursParked = Math.max(1, Math.ceil(parkedSeconds / 3600));
   const ratePerHour = 20;
   const amount = hoursParked * ratePerHour;
 
-  // เบอร์ PromptPay ลานจอดรถ
   const PROMPTPAY_ID = "0812345678"; 
   const qrPayload = generatePayload(PROMPTPAY_ID, { amount });
 
-  // ===============================================================
-  // 1. MQTT Real-time Sync (เชื่อมต่อ Python & ขอเวลา time_in จาก DB)
-  // ===============================================================
+  // 1. MQTT Listener
   useEffect(() => {
     const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
 
     client.on('connect', () => {
-      console.log('MQTT Connected');
-      // ฟังข้อมูลสถานะเฉพาะ UID นี้
       client.subscribe(`parking/status/${uid}`);
-      
-      // ส่งคำขอข้อมูลเวลาเข้าจอดจาก Python SQLite ทันทีที่โหลดหน้าเว็บ
       client.publish('parking/request/status', JSON.stringify({ uid }));
     });
 
@@ -60,9 +53,13 @@ function PaymentContent() {
           setStatus('parked');
         }
 
-        // เมื่อได้รับเวลาเข้าจอดจริง (time_in) จาก Database
         if (data.time_in) {
           setEntryTime(data.time_in);
+        }
+
+        // รับรูปภาพ Base64 จาก Python
+        if (data.image_base64) {
+          setEntryImage(data.image_base64);
         }
       } catch (e) {
         console.error('MQTT Message Error:', e);
@@ -74,15 +71,12 @@ function PaymentContent() {
     };
   }, [uid]);
 
-  // ===============================================================
-  // 2. คำนวณเวลาจอดจริง Real-time (เปรียบเทียบเวลา DB กับ เวลาปัจจุบัน)
-  // ===============================================================
+  // 2. คำนวณระยะเวลาจอด
   useEffect(() => {
     if (status === 'success' || status === 'receipt' || status === 'sos') return;
 
     const calculateDuration = () => {
       if (entryTime) {
-        // ฟอร์แมตเวลาสตริงจาก SQLite ให้เป็น ISO Standard สำหรับ JS Date
         const formattedTime = entryTime.includes('T') ? entryTime : entryTime.replace(' ', 'T');
         const startMs = new Date(formattedTime).getTime();
         const nowMs = Date.now();
@@ -93,7 +87,6 @@ function PaymentContent() {
           return;
         }
       }
-      // ถ้ายังไม่ได้รับ time_in จาก DB ให้บวกเวลาจำลองทีละ 1 วินาทีไปก่อน
       setParkedSeconds((prev) => prev + 1);
     };
 
@@ -102,9 +95,27 @@ function PaymentContent() {
     return () => clearInterval(interval);
   }, [entryTime, status]);
 
-  // ===============================================================
-  // 3. ส่งสัญญาณเปิดไม้กั้นไปที่ Python ผ่าน MQTT เมื่อกดชำระเงิน
-  // ===============================================================
+  // ฟอร์แมตเวลาเข้าจอดให้อ่านง่าย (ข้อ 2)
+  const formatEntryTimeDisplay = (timeStr: string | null) => {
+    if (!timeStr) return "กำลังโหลดเวลา...";
+    try {
+      const formatted = timeStr.includes('T') ? timeStr : timeStr.replace(' ', 'T');
+      const date = new Date(formatted);
+      if (isNaN(date.getTime())) return timeStr;
+
+      const day = date.getDate().toString().padStart(2, '0');
+      const monthNames = ["ม.ค.", "ก.พ.", "มี.ค.", "เม.ย.", "พ.ค.", "มิ.ย.", "ก.ค.", "ส.ค.", "ก.ย.", "ต.ค.", "พ.ย.", "ธ.ค."];
+      const month = monthNames[date.getMonth()];
+      const year = date.getFullYear() + 543;
+      const hours = date.getHours().toString().padStart(2, '0');
+      const minutes = date.getMinutes().toString().padStart(2, '0');
+
+      return `${day} ${month} ${year} เวลา ${hours}:${minutes} น.`;
+    } catch {
+      return timeStr;
+    }
+  };
+
   const handleConfirmPayment = () => {
     try {
       const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
@@ -123,21 +134,15 @@ function PaymentContent() {
     setStatus('success');
   };
 
-  // นับถอยหลังจ่ายเงิน
   useEffect(() => {
     if (status !== 'paying' || payCountdown <= 0) return;
-    const timer = setInterval(() => {
-      setPayCountdown((prev) => prev - 1);
-    }, 1000);
+    const timer = setInterval(() => setPayCountdown((prev) => prev - 1), 1000);
     return () => clearInterval(timer);
   }, [status, payCountdown]);
 
-  // นับถอยหลังเวลาขับออก (Grace Period)
   useEffect(() => {
     if (status !== 'success' || exitCountdown <= 0) return;
-    const timer = setInterval(() => {
-      setExitCountdown((prev) => prev - 1);
-    }, 1000);
+    const timer = setInterval(() => setExitCountdown((prev) => prev - 1), 1000);
     return () => clearInterval(timer);
   }, [status, exitCountdown]);
 
@@ -154,7 +159,6 @@ function PaymentContent() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // คัดลอกข้อความ PromptPay (รองรับ HTTP / IP วง LAN)
   const handleCopyPromptPay = async () => {
     try {
       if (navigator.clipboard && window.isSecureContext) {
@@ -180,7 +184,7 @@ function PaymentContent() {
 
   const handleExtendGracePeriod = () => {
     if (!extendedTime) {
-      setExitCountdown((prev) => prev + 300); // เพิ่ม 5 นาที (300 วิ)
+      setExitCountdown((prev) => prev + 300);
       setExtendedTime(true);
     }
   };
@@ -189,7 +193,7 @@ function PaymentContent() {
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col items-center justify-center p-4 font-sans">
       <div className="w-full max-w-md space-y-4">
         
-        {/* Header Branding & SOS Button */}
+        {/* Header Branding */}
         <div className="flex items-center justify-between px-2">
           <div className="flex items-center gap-2">
             <div className="bg-amber-400/10 p-2 rounded-xl text-amber-400 border border-amber-400/20">
@@ -201,7 +205,6 @@ function PaymentContent() {
             </div>
           </div>
           
-          {/* Quick SOS Trigger */}
           <button 
             onClick={() => setStatus('sos')}
             className="text-xs bg-rose-500/10 text-rose-400 border border-rose-500/30 px-2.5 py-1.5 rounded-full font-semibold flex items-center gap-1 hover:bg-rose-500/20 transition"
@@ -222,7 +225,6 @@ function PaymentContent() {
             </div>
           </div>
 
-          {/* Location Spot Badge */}
           <div className="inline-flex items-center gap-1.5 bg-slate-950/80 border border-slate-700 px-3 py-1.5 rounded-lg text-xs text-amber-300 mb-2">
             <MapPin className="w-3.5 h-3.5 text-amber-400" />
             <span>ตำแหน่งจอด: <strong>{zone}</strong></span>
@@ -254,31 +256,41 @@ function PaymentContent() {
           {/* STATE 1: PARKED */}
           {status === 'parked' && (
             <div className="space-y-5">
-              <div className="flex items-center justify-between bg-slate-950 p-4 rounded-xl border border-slate-800">
-                <div className="flex items-center gap-3">
-                  <div className="bg-blue-500/10 p-2.5 rounded-lg text-blue-400">
-                    <Clock className="w-5 h-5" />
+              
+              {/* ระยะเวลา และ [ข้อ 2] แสดงเวลาเข้าจอดจริง */}
+              <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="bg-blue-500/10 p-2.5 rounded-lg text-blue-400">
+                      <Clock className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-400">ระยะเวลาเข้าจอด</p>
+                      <p className="text-sm font-semibold text-slate-100 font-mono">{formatDuration(parkedSeconds)}</p>
+                    </div>
                   </div>
-                  <div>
-                    <p className="text-xs text-slate-400">ระยะเวลาเข้าจอด</p>
-                    <p className="text-sm font-semibold text-slate-100 font-mono">{formatDuration(parkedSeconds)}</p>
+                  <div className="text-right">
+                    <button 
+                      onClick={() => setShowBreakdown(!showBreakdown)}
+                      className="text-xs text-amber-400 underline font-medium flex items-center gap-1 justify-end"
+                    >
+                      <HelpCircle className="w-3.5 h-3.5" /> รายละเอียดค่าจอด
+                    </button>
+                    <p className="text-xs text-slate-400 mt-1">฿20 / ชั่วโมง</p>
                   </div>
                 </div>
-                <div className="text-right">
-                  <button 
-                    onClick={() => setShowBreakdown(!showBreakdown)}
-                    className="text-xs text-amber-400 underline font-medium flex items-center gap-1 justify-end"
-                  >
-                    <HelpCircle className="w-3.5 h-3.5" /> รายละเอียดค่าจอด
-                  </button>
-                  <p className="text-xs text-slate-400 mt-1">฿20 / ชั่วโมง</p>
+
+                {/* [ข้อ 2] บรรทัดระบุเวลาเข้าจอดจริง */}
+                <div className="pt-2.5 border-t border-slate-800/80 flex items-center gap-2 text-xs text-slate-300">
+                  <Calendar className="w-3.5 h-3.5 text-amber-400" />
+                  <span>เวลาเข้าจอดจริง: <strong className="text-slate-100 font-mono">{formatEntryTimeDisplay(entryTime)}</strong></span>
                 </div>
               </div>
 
               {/* Fee Breakdown Drawer */}
               {showBreakdown && (
                 <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 text-xs space-y-1.5 font-mono text-slate-300">
-                  <div className="flex justify-between"><span>เวลาเข้าจอด:</span><span>{entryTime ? entryTime.split(' ')[1] || entryTime : '14:00 น.'}</span></div>
+                  <div className="flex justify-between"><span>เวลาเข้าจอด:</span><span>{entryTime ? entryTime.split(' ')[1] || entryTime : '-'}</span></div>
                   <div className="flex justify-between"><span>คำนวณเวลา:</span><span>{hoursParked} ชม. (ปัดเศษขึ้น)</span></div>
                   <div className="flex justify-between"><span>อัตราต่อชั่วโมง:</span><span>฿20.00</span></div>
                   <div className="flex justify-between text-amber-400 font-bold pt-1 border-t border-slate-800">
@@ -287,18 +299,27 @@ function PaymentContent() {
                 </div>
               )}
 
-              {/* ALPR Snapshot Preview */}
+              {/* [ข้อ 1] ALPR Snapshot Preview - แสดงรูปกล้องจริง */}
               <div className="bg-slate-950 rounded-xl p-3 border border-slate-800 space-y-2">
                 <div className="flex items-center justify-between text-xs text-slate-400 px-1">
                   <span className="flex items-center gap-1"><Camera className="w-3.5 h-3.5 text-blue-400" /> ภาพถ่ายบันทึกขาเข้า (ALPR)</span>
                   <span className="text-[10px] text-emerald-400 font-mono">MATCHED 98%</span>
                 </div>
-                <div className="relative h-28 bg-slate-900 rounded-lg border border-slate-800 flex items-center justify-center">
-                  <div className="text-center space-y-1 z-20">
-                    <Car className="w-7 h-7 text-slate-600 mx-auto" />
-                    <p className="text-[11px] text-slate-400 font-mono">ENTRY LOG #{uid.slice(0, 4)}</p>
-                  </div>
-                  <span className="absolute bottom-2 left-2 text-[10px] bg-slate-950/90 text-amber-400 font-mono px-2 py-0.5 rounded border border-amber-400/30">
+                
+                <div className="relative h-44 bg-slate-900 rounded-lg border border-slate-800 overflow-hidden flex items-center justify-center">
+                  {entryImage ? (
+                    <img 
+                      src={`data:image/jpeg;base64,${entryImage}`} 
+                      alt="ALPR Entry Camera Capture" 
+                      className="w-full h-full object-cover"
+                    />
+                  ) : (
+                    <div className="text-center space-y-1 z-20">
+                      <Car className="w-8 h-8 text-slate-600 mx-auto animate-pulse" />
+                      <p className="text-[11px] text-slate-400 font-mono">กำลังดึงรูปภาพจากกล้อง...</p>
+                    </div>
+                  )}
+                  <span className="absolute bottom-2 left-2 text-[10px] bg-slate-950/90 text-amber-400 font-mono px-2 py-0.5 rounded border border-amber-400/30 shadow-lg">
                     {licensePlate} | PASSED
                   </span>
                 </div>
@@ -334,11 +355,7 @@ function PaymentContent() {
               </div>
 
               <div className="bg-white p-4 rounded-2xl shadow-2xl border-4 border-amber-400/20">
-                <QRCodeSVG 
-                  value={qrPayload} 
-                  size={170} 
-                  includeMargin={true}
-                />
+                <QRCodeSVG value={qrPayload} size={170} includeMargin={true} />
               </div>
 
               <button 
@@ -382,7 +399,6 @@ function PaymentContent() {
                 <p className="text-xs text-slate-300 mt-0.5">ระบบส่งสัญญาณเปิดไม้กั้นขาออกเรียบร้อยแล้ว</p>
               </div>
 
-              {/* Grace Period Countdown */}
               <div className="w-full bg-slate-950 p-4 rounded-xl border border-amber-400/30 space-y-2">
                 <span className="text-xs text-slate-400 block">เวลาที่เหลือในการนำรถออก (Grace Period)</span>
                 <div className="text-3xl font-extrabold text-amber-400 font-mono">
@@ -434,6 +450,7 @@ function PaymentContent() {
                 <div className="space-y-1 text-slate-300">
                   <div className="flex justify-between"><span>RECEIPT NO:</span><span className="text-slate-100">#REC-{uid.slice(0, 4)}</span></div>
                   <div className="flex justify-between"><span>LICENSE PLATE:</span><span className="text-slate-100">{licensePlate}</span></div>
+                  <div className="flex justify-between"><span>ENTRY TIME:</span><span className="text-slate-100">{entryTime || '-'}</span></div>
                   <div className="flex justify-between"><span>DURATION:</span><span className="text-slate-100">{hoursParked} ชั่วโมง</span></div>
                   <div className="flex justify-between"><span>PAYMENT METHOD:</span><span className="text-slate-100">PROMPTPAY</span></div>
                 </div>
