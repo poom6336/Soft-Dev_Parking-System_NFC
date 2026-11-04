@@ -2,6 +2,7 @@ import sys
 import os
 import time
 import serial
+import json
 import paho.mqtt.client as mqtt
 from adafruit_pn532.uart import PN532_UART
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -16,7 +17,7 @@ class MQTTListenerThread(QThread):
     card_scanned = pyqtSignal(str)
     log_msg = pyqtSignal(str)
 
-    def __init__(self, broker_address="test.mosquitto.org", topic="parking/entry/scan"):
+    def __init__(self, broker_address="broker.emqx.io", topic="parking/entry/scan"):
         super().__init__()
         self.broker = broker_address
         self.topic = topic
@@ -56,7 +57,6 @@ class MQTTListenerThread(QThread):
         self.wait()
 
 
-
 class ParkingDashboard(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -64,9 +64,16 @@ class ParkingDashboard(QMainWindow):
         self.parking = ParkingSys('parking.db')
         self.parking.create_tables()
 
-        #demo db
-        self.parking.register_member('A1B2C3D4', 'กท-2058')
+        # demo db
+        self.parking.register_member('A1B2C3D4', 'กท-1234')
         self.parking.register_member('E5F6G7H8', 'สข-9999', 'vip')
+
+        self.pub_client = mqtt.Client()
+        try:
+            self.pub_client.connect("broker.emqx.io", 1883, 60)
+            self.pub_client.loop_start()
+        except Exception as e:
+            print(f"MQTT Pub Connect Error: {e}")
 
         self.setWindowTitle("SMART PARKING TERMINAL")
         self.resize(1000, 600)
@@ -136,9 +143,9 @@ class ParkingDashboard(QMainWindow):
     
         self.handle_read()
 
-        # NFC Thread
+        # NFC Thread (ใช้ Broker ตัวเดียวกับ Next.js)
         self.log_message("SYSTEM INITIALIZED. READY.")
-        self.mqtt_thread = MQTTListenerThread(broker_address="test.mosquitto.org", topic="parking/entry/scan")
+        self.mqtt_thread = MQTTListenerThread(broker_address="broker.emqx.io", topic="parking/entry/scan")
         self.mqtt_thread.card_scanned.connect(self.process_scan)
         self.mqtt_thread.log_msg.connect(self.log_message)
         self.mqtt_thread.start()
@@ -189,7 +196,7 @@ class ParkingDashboard(QMainWindow):
         self.log_text.setFont(QFont("Consolas", 10))
 
         btn_layout = QHBoxLayout()
-        btn_scan_car1 = QPushButton("Scan: กท-2058")
+        btn_scan_car1 = QPushButton("Scan: กท-1234")
         btn_scan_car1.setStyleSheet("background-color: #CBA6F7;")
         btn_scan_car1.clicked.connect(lambda: self.simulate_scan('A1B2C3D4'))
 
@@ -219,14 +226,29 @@ class ParkingDashboard(QMainWindow):
             self.log_message(scan_result_message)
             self.update_image(uid)
 
+            query = "SELECT m.license_plate, l.status, l.time_in FROM parking_logs l LEFT JOIN members m ON l.uid = m.uid WHERE l.uid = ? ORDER BY l.time_in DESC LIMIT 1"
+            self.parking.cursor.execute(query, (uid,))
+            
+            row = self.parking.cursor.fetchone()
+            plate = row[0] if row and row[0] else 'กท-1234'
+            status = row[1] if row and row[1] else 'parked'
+
+            payload = json.dumps({
+                "uid": uid,
+                "plate": plate,
+                "status": status,
+                "zone": "ชั้น 2 - โซน B14"
+            })
+
+            self.pub_client.publish(f"parking/status/{uid}", payload)
+            self.pub_client.publish("parking/scan/live", payload)
+
         except Exception as e:
             self.log_message(f"Error: {e}")
 
     def update_image(self, uid):
-        self.parking.cursor.execute('''
-            SELECT image_path, status FROM parking_logs 
-            WHERE uid = ? ORDER BY time_in DESC LIMIT 1
-        ''', (uid,))
+        query = "SELECT image_path, status FROM parking_logs WHERE uid = ? ORDER BY time_in DESC LIMIT 1"
+        self.parking.cursor.execute(query, (uid,))
         
         result = self.parking.cursor.fetchone()
         
@@ -249,19 +271,14 @@ class ParkingDashboard(QMainWindow):
                 self.log_message(f"Image not found: {img_path}")
 
     def simulate_scan(self, uid):
-        self.log_message(f"\nScanning UID: {uid}")
-        
-        try:
-            scan_result = self.parking.handle_scan(uid)
-            self.log_message(scan_result)
-            self.update_image(uid)
-            
-        except Exception as e:
-            self.log_message(f"Error: {e}")
+        self.process_scan(uid)
 
     def closeEvent(self, event):
         self.log_message("Exitting")
         self.mqtt_thread.stop()
+        if hasattr(self, 'pub_client'):
+            self.pub_client.loop_stop()
+            self.pub_client.disconnect()
         event.accept()
 
     # Tab 2 (Management)
