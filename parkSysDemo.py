@@ -127,13 +127,13 @@ class ParkingSys:
             return "Camera is not ready"
 
         height, width, _ = frame.shape
-        y_start = int(height * 0.4)
+        """y_start = int(height * 0.4)
         y_end = int(height * 0.9)
         x_start = int(width * 0.2)
-        x_end = int(width * 0.8)
+        x_end = int(width * 0.8)"""
 
-        roi_frame = frame[y_start:y_end, x_start:x_end]
-        gray_roi = cv2.cvtColor(roi_frame, cv2.COLOR_BGR2GRAY)
+        #roi_frame = frame[y_start:y_end, x_start:x_end]
+        gray_roi = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         blur_roi = cv2.GaussianBlur(gray_roi, (5, 5), 0)
         _, thresh_roi = cv2.threshold(blur_roi, 100, 255, cv2.THRESH_BINARY)
         
@@ -144,13 +144,13 @@ class ParkingSys:
         alpr_raw_text = " ".join(detected_texts) # เก็บข้อความดิบไว้โชว์บนหน้าจอ
 
         if clean_db_plate not in alpr_combined:
-            cv2.rectangle(frame, (x_start, y_start), (x_end, y_end), (0, 0, 255), 2)
+            #cv2.rectangle(frame, (x_start, y_start), (x_end, y_end), (0, 0, 255), 2)
             
             return (f"[DENIED] Access denied\n"
                     f"License not found or not registered\n"
                     f"In system: {license_plate} | Read found: '{alpr_raw_text}'")
         
-        cv2.rectangle(frame, (x_start, y_start), (x_end, y_end), (0, 255, 0), 2)
+        #cv2.rectangle(frame, (x_start, y_start), (x_end, y_end), (0, 255, 0), 2)
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         
         self.cursor.execute('''
