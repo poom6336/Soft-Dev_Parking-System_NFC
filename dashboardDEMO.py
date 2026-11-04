@@ -1,15 +1,14 @@
 import sys
 import os
 import time
-import serial
 import json
-import base64  # <--- เพิ่มการ import base64
+import base64
+import datetime
 import paho.mqtt.client as mqtt
-from adafruit_pn532.uart import PN532_UART
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QTextEdit, 
                              QFormLayout, QLineEdit, QTableWidget, QHeaderView,
-                             QTableWidgetItem, QMessageBox, QTabWidget)
+                             QTableWidgetItem, QTabWidget)
 from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from parkSysDemo import ParkingSys
@@ -17,6 +16,7 @@ from parkSysDemo import ParkingSys
 class MQTTListenerThread(QThread):
     card_scanned = pyqtSignal(str)
     status_requested = pyqtSignal(str)
+    gate_exit_requested = pyqtSignal(str, float)
     log_msg = pyqtSignal(str)
 
     def __init__(self, broker_address="broker.emqx.io"):
@@ -30,6 +30,7 @@ class MQTTListenerThread(QThread):
             self.log_msg.emit(f"Connect to MQTT Broker: {self.broker} success")
             self.client.subscribe("parking/entry/scan")
             self.client.subscribe("parking/request/status")
+            self.client.subscribe("parking/gate/exit")
         else:
             self.log_msg.emit(f"Fail to connect to MQTT (code: {rc})")
 
@@ -47,6 +48,15 @@ class MQTTListenerThread(QThread):
                     self.status_requested.emit(uid)
             except Exception:
                 pass
+        elif topic == "parking/gate/exit":
+            try:
+                data = json.loads(payload)
+                uid = data.get("uid")
+                amount = float(data.get("amount", 20.0))
+                if uid:
+                    self.gate_exit_requested.emit(uid, amount)
+            except Exception as e:
+                self.log_msg.emit(f"Exit payload parse error: {e}")
 
     def run(self):
         self.client.on_connect = self.on_connect
@@ -155,6 +165,7 @@ class ParkingDashboard(QMainWindow):
         self.mqtt_thread = MQTTListenerThread(broker_address="broker.emqx.io")
         self.mqtt_thread.card_scanned.connect(self.process_scan)
         self.mqtt_thread.status_requested.connect(self.send_user_status)
+        self.mqtt_thread.gate_exit_requested.connect(self.process_exit)
         self.mqtt_thread.log_msg.connect(self.log_message)
         self.mqtt_thread.start()
 
@@ -223,14 +234,79 @@ class ParkingDashboard(QMainWindow):
         self.log_text.append(text)
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
+    def process_exit(self, uid, amount):
+        """ STEP 2: เมื่อกดชำระเงินบนหน้าเว็บ -> เปลี่ยนสถานะเป็น 'paid' """
+        try:
+            query = """
+                UPDATE parking_logs 
+                SET status = 'paid', fee_calculated = ? 
+                WHERE uid = ? AND status = 'parked'
+            """
+            self.parking.cursor.execute(query, (amount, uid))
+            self.parking.conn.commit()
+
+            self.log_message(f"💳 [PAYMENT SUCCESS] UID: {uid} Paid ฿{amount:.2f} -> STATUS: PAID (Waiting for NFC Exit Scan)")
+            self.plate_label.setText(f"PAID: {uid}\nScan NFC at Exit Gate")
+            self.plate_label.setStyleSheet("background-color: #F9E2AF; color: #11111B; border-radius: 10px; padding: 15px;")
+            
+            self.send_user_status(uid)
+
+        except Exception as e:
+            self.log_message(f"Error processing payment: {e}")
+
+    def process_scan(self, uid):
+        """ STEP 1 & 3: ประมวลผลการแตะบัตร NFC ที่ตู้ทางเข้า-ทางออก """
+        self.log_message(f"\nNFC read: {uid}")
+        try:
+            query = "SELECT log_id, status FROM parking_logs WHERE uid = ? ORDER BY log_id DESC LIMIT 1"
+            self.parking.cursor.execute(query, (uid,))
+            row = self.parking.cursor.fetchone()
+            
+            last_log_id = row[0] if row else None
+            current_status = row[1] if row else None
+
+            # 🟢 เคส A: แตะบัตรขาออก โดยที่ "ชำระเงินบนเว็บเรียบร้อยแล้ว" (status = 'paid')
+            if current_status == 'paid':
+                now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                update_query = """
+                    UPDATE parking_logs 
+                    SET status = 'completed', time_out = ? 
+                    WHERE log_id = ?
+                """
+                self.parking.cursor.execute(update_query, (now_str, last_log_id))
+                self.parking.conn.commit()
+
+                self.log_message(f"🟢 [GATE OPEN] UID: {uid} - Scanned OUT at {now_str}. STATUS: COMPLETED")
+                self.plate_label.setText(f"GATE OPEN - HAVE A SAFE TRIP!\n{uid}")
+                self.plate_label.setStyleSheet("background-color: #A6E3A1; color: #11111B; border-radius: 10px; padding: 15px;")
+                
+                self.send_user_status(uid)
+
+            # 🚘 เคส B: แตะบัตรขาเข้า (ยังไม่มีข้อมูล หรือ จอดรอบก่อนจบ 'completed' ไปแล้ว)
+            elif current_status is None or current_status == 'completed':
+                scan_result_message = self.parking.handle_scan(uid)
+                self.log_message(f"🚘 [ENTRY SCAN] {scan_result_message}")
+                self.update_image(uid)
+                self.send_user_status(uid)
+
+            # 🔴 เคส C: แตะบัตรขาออก แต่ "ยังไม่ได้ชำระเงิน" (status = 'parked')
+            elif current_status == 'parked':
+                self.log_message(f"🔴 [GATE CLOSED] UID: {uid} - Payment required before exit!")
+                self.plate_label.setText(f"PLEASE PAY FIRST!\n{uid}")
+                self.plate_label.setStyleSheet("background-color: #F38BA8; color: #11111B; border-radius: 10px; padding: 15px;")
+                self.send_user_status(uid)
+
+        except Exception as e:
+            self.log_message(f"Error in process_scan: {e}")
+
     def send_user_status(self, uid):
-        """ ดึงเวลาเข้าจอด และแปลงไฟล์รูปภาพใน DB เป็น Base64 ส่งไปที่ Next.js """
+        """ ดึงข้อมูลเวลา, รูปภาพ, และประวัติย้อนหลัง 5 รายการจาก SQLite ส่งไป Next.js """
         try:
             query = """
                 SELECT m.license_plate, l.status, l.time_in, l.image_path 
                 FROM parking_logs l 
                 LEFT JOIN members m ON l.uid = m.uid 
-                WHERE l.uid = ? ORDER BY l.time_in DESC LIMIT 1
+                WHERE l.uid = ? ORDER BY l.log_id DESC LIMIT 1
             """
             self.parking.cursor.execute(query, (uid,))
             row = self.parking.cursor.fetchone()
@@ -246,7 +322,6 @@ class ParkingDashboard(QMainWindow):
                 time_in = str(row[2]) if row[2] else None
                 img_path = row[3] if len(row) > 3 and row[3] else None
 
-                # อ่านไฟล์รูปแล้วแปลงเป็น Base64 String
                 if img_path and os.path.exists(img_path):
                     try:
                         with open(img_path, "rb") as img_file:
@@ -254,12 +329,32 @@ class ParkingDashboard(QMainWindow):
                     except Exception as img_err:
                         self.log_message(f"Image base64 read error: {img_err}")
 
+            # ดึงประวัติการจอดรถย้อนหลัง 5 รายการล่าสุด
+            self.parking.cursor.execute("""
+                SELECT time_in, time_out, status, fee_calculated 
+                FROM parking_logs 
+                WHERE uid = ? 
+                ORDER BY log_id DESC 
+                LIMIT 5
+            """, (uid,))
+            history_rows = self.parking.cursor.fetchall()
+            
+            history_list = []
+            for h in history_rows:
+                history_list.append({
+                    "time_in": str(h[0]) if h[0] else "-",
+                    "time_out": str(h[1]) if h[1] else "-",
+                    "status": h[2] if h[2] else "-",
+                    "fee": h[3] if h[3] is not None else 0.0
+                })
+
             payload = json.dumps({
                 "uid": uid,
                 "plate": plate,
                 "status": status,
-                "time_in": time_in,          # เวลาเข้าจอดจริง
-                "image_base64": img_base64,  # รูปถ่ายจากกล้องจริง
+                "time_in": time_in,
+                "image_base64": img_base64,
+                "history": history_list,
                 "zone": "ชั้น 2 - โซน B14"
             })
 
@@ -269,19 +364,8 @@ class ParkingDashboard(QMainWindow):
         except Exception as e:
             self.log_message(f"Error sending status: {e}")
 
-    def process_scan(self, uid):
-        self.log_message(f"\nNFC read: {uid}")
-        try:
-            scan_result_message = self.parking.handle_scan(uid)
-            self.log_message(scan_result_message)
-            self.update_image(uid)
-            self.send_user_status(uid)
-
-        except Exception as e:
-            self.log_message(f"Error: {e}")
-
     def update_image(self, uid):
-        query = "SELECT image_path, status FROM parking_logs WHERE uid = ? ORDER BY time_in DESC LIMIT 1"
+        query = "SELECT image_path, status FROM parking_logs WHERE uid = ? ORDER BY log_id DESC LIMIT 1"
         self.parking.cursor.execute(query, (uid,))
         result = self.parking.cursor.fetchone()
         
