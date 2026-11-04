@@ -3,6 +3,7 @@ import os
 import time
 import serial
 import json
+import base64  # <--- เพิ่มการ import base64
 import paho.mqtt.client as mqtt
 from adafruit_pn532.uart import PN532_UART
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
@@ -15,25 +16,37 @@ from parkSysDemo import ParkingSys
 
 class MQTTListenerThread(QThread):
     card_scanned = pyqtSignal(str)
+    status_requested = pyqtSignal(str)
     log_msg = pyqtSignal(str)
 
-    def __init__(self, broker_address="broker.emqx.io", topic="parking/entry/scan"):
+    def __init__(self, broker_address="broker.emqx.io"):
         super().__init__()
         self.broker = broker_address
-        self.topic = topic
         self.client = mqtt.Client()
         self.is_running = True
 
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
             self.log_msg.emit(f"Connect to MQTT Broker: {self.broker} success")
-            self.client.subscribe(self.topic)
+            self.client.subscribe("parking/entry/scan")
+            self.client.subscribe("parking/request/status")
         else:
             self.log_msg.emit(f"Fail to connect to MQTT (code: {rc})")
 
     def on_message(self, client, userdata, msg):
-        uid_hex = msg.payload.decode("utf-8")
-        self.card_scanned.emit(uid_hex)
+        topic = msg.topic
+        payload = msg.payload.decode("utf-8")
+
+        if topic == "parking/entry/scan":
+            self.card_scanned.emit(payload)
+        elif topic == "parking/request/status":
+            try:
+                data = json.loads(payload)
+                uid = data.get("uid")
+                if uid:
+                    self.status_requested.emit(uid)
+            except Exception:
+                pass
 
     def run(self):
         self.client.on_connect = self.on_connect
@@ -64,7 +77,6 @@ class ParkingDashboard(QMainWindow):
         self.parking = ParkingSys('parking.db')
         self.parking.create_tables()
 
-        # demo db
         self.parking.register_member('A1B2C3D4', 'กท-1234')
         self.parking.register_member('E5F6G7H8', 'สข-9999', 'vip')
 
@@ -79,9 +91,7 @@ class ParkingDashboard(QMainWindow):
         self.resize(1000, 600)
 
         self.setStyleSheet("""
-            QMainWindow, QWidget#tab_bg {
-                background-color: #1E1E2E;
-            }
+            QMainWindow, QWidget#tab_bg { background-color: #1E1E2E; }
             QLabel { color: #CDD6F4; }
             QTextEdit, QLineEdit, QTableWidget {
                 background-color: #181825;
@@ -90,9 +100,7 @@ class ParkingDashboard(QMainWindow):
                 border-radius: 8px;
                 padding: 5px;
             }
-            QTableWidget {
-                color: #CDD6F4;
-            }
+            QTableWidget { color: #CDD6F4; }
             QHeaderView::section {
                 background-color: #313244;
                 color: #CDD6F4;
@@ -143,17 +151,15 @@ class ParkingDashboard(QMainWindow):
     
         self.handle_read()
 
-        # NFC Thread (ใช้ Broker ตัวเดียวกับ Next.js)
         self.log_message("SYSTEM INITIALIZED. READY.")
-        self.mqtt_thread = MQTTListenerThread(broker_address="broker.emqx.io", topic="parking/entry/scan")
+        self.mqtt_thread = MQTTListenerThread(broker_address="broker.emqx.io")
         self.mqtt_thread.card_scanned.connect(self.process_scan)
+        self.mqtt_thread.status_requested.connect(self.send_user_status)
         self.mqtt_thread.log_msg.connect(self.log_message)
         self.mqtt_thread.start()
 
     def setup_dashboard_tab(self):
         main_layout = QHBoxLayout()
-
-        # left part
         left_layout = QVBoxLayout()
 
         self.plate_label = QLabel("Waiting for user")
@@ -184,7 +190,6 @@ class ParkingDashboard(QMainWindow):
 
         main_layout.addLayout(left_layout)
 
-        # right part
         right_layout = QVBoxLayout()
 
         title_log = QLabel("LIVE SYSTEM LOGS")
@@ -212,31 +217,49 @@ class ParkingDashboard(QMainWindow):
         right_layout.addLayout(btn_layout)
 
         main_layout.addLayout(right_layout)
-        
         self.tab_dashboard.setLayout(main_layout)
 
     def log_message(self, text):
         self.log_text.append(text)
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
-    def process_scan(self, uid):
-        self.log_message(f"\nNFC read: {uid}")
+    def send_user_status(self, uid):
+        """ ดึงเวลาเข้าจอด และแปลงไฟล์รูปภาพใน DB เป็น Base64 ส่งไปที่ Next.js """
         try:
-            scan_result_message = self.parking.handle_scan(uid)
-            self.log_message(scan_result_message)
-            self.update_image(uid)
-
-            query = "SELECT m.license_plate, l.status, l.time_in FROM parking_logs l LEFT JOIN members m ON l.uid = m.uid WHERE l.uid = ? ORDER BY l.time_in DESC LIMIT 1"
+            query = """
+                SELECT m.license_plate, l.status, l.time_in, l.image_path 
+                FROM parking_logs l 
+                LEFT JOIN members m ON l.uid = m.uid 
+                WHERE l.uid = ? ORDER BY l.time_in DESC LIMIT 1
+            """
             self.parking.cursor.execute(query, (uid,))
-            
             row = self.parking.cursor.fetchone()
-            plate = row[0] if row and row[0] else 'กท-1234'
-            status = row[1] if row and row[1] else 'parked'
+            
+            plate = 'กท-1234'
+            status = 'parked'
+            time_in = None
+            img_base64 = None
+
+            if row:
+                plate = row[0] if row[0] else 'กท-1234'
+                status = row[1] if row[1] else 'parked'
+                time_in = str(row[2]) if row[2] else None
+                img_path = row[3] if len(row) > 3 and row[3] else None
+
+                # อ่านไฟล์รูปแล้วแปลงเป็น Base64 String
+                if img_path and os.path.exists(img_path):
+                    try:
+                        with open(img_path, "rb") as img_file:
+                            img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+                    except Exception as img_err:
+                        self.log_message(f"Image base64 read error: {img_err}")
 
             payload = json.dumps({
                 "uid": uid,
                 "plate": plate,
                 "status": status,
+                "time_in": time_in,          # เวลาเข้าจอดจริง
+                "image_base64": img_base64,  # รูปถ่ายจากกล้องจริง
                 "zone": "ชั้น 2 - โซน B14"
             })
 
@@ -244,18 +267,27 @@ class ParkingDashboard(QMainWindow):
             self.pub_client.publish("parking/scan/live", payload)
 
         except Exception as e:
+            self.log_message(f"Error sending status: {e}")
+
+    def process_scan(self, uid):
+        self.log_message(f"\nNFC read: {uid}")
+        try:
+            scan_result_message = self.parking.handle_scan(uid)
+            self.log_message(scan_result_message)
+            self.update_image(uid)
+            self.send_user_status(uid)
+
+        except Exception as e:
             self.log_message(f"Error: {e}")
 
     def update_image(self, uid):
         query = "SELECT image_path, status FROM parking_logs WHERE uid = ? ORDER BY time_in DESC LIMIT 1"
         self.parking.cursor.execute(query, (uid,))
-        
         result = self.parking.cursor.fetchone()
         
         if result and result[0]:
             img_path = result[0]
             status = result[1]
-            
             if os.path.exists(img_path):
                 pixmap = QPixmap(img_path)
                 scaled_pixmap = pixmap.scaled(400, 300, Qt.AspectRatioMode.KeepAspectRatio)
@@ -267,36 +299,27 @@ class ParkingDashboard(QMainWindow):
                 else:
                     self.plate_label.setText(f"Exit: {result}")
                     self.plate_label.setStyleSheet("background-color: #313244; color: #F9E2AF; border-radius: 10px; padding: 15px;")
-            else:
-                self.log_message(f"Image not found: {img_path}")
 
     def simulate_scan(self, uid):
         self.process_scan(uid)
 
     def closeEvent(self, event):
-        self.log_message("Exitting")
         self.mqtt_thread.stop()
         if hasattr(self, 'pub_client'):
             self.pub_client.loop_stop()
             self.pub_client.disconnect()
         event.accept()
 
-    # Tab 2 (Management)
     def setup_management_tab(self):
         layout = QHBoxLayout()
-        
-        # L panel: Form, buttons
         left_panel = QVBoxLayout()
         left_panel.addWidget(QLabel("Database management", font=QFont("Segoe UI", 12, QFont.Weight.Bold)))
         
-        # Create form
         form_layout = QFormLayout()
         self.input_uid = QLineEdit()
         self.input_uid.setPlaceholderText("Fill UID")
-        
         self.input_plate = QLineEdit()
         self.input_plate.setPlaceholderText("Fill license plate")
-        
         self.input_type = QLineEdit()
         self.input_type.setText("regular")
         
@@ -305,18 +328,12 @@ class ParkingDashboard(QMainWindow):
         form_layout.addRow("Type:", self.input_type)
         left_panel.addLayout(form_layout)
         
-        # CRUD buttons
         btn_create = QPushButton("Add new member")
         btn_create.clicked.connect(self.handle_create)
-        
-        btn_update = QPushButton("Update data (Search with UID)")
-        btn_update.setStyleSheet("background-color: #F9E2AF; color: #11111B;")
+        btn_update = QPushButton("Update data")
         btn_update.clicked.connect(self.handle_update)
-        
-        btn_delete = QPushButton("Delete member search with UID")
-        btn_delete.setStyleSheet("background-color: #F38BA8; color: #11111B;")
+        btn_delete = QPushButton("Delete member")
         btn_delete.clicked.connect(self.handle_delete)
-        
         btn_read = QPushButton("Refresh table")
         btn_read.clicked.connect(self.handle_read)
 
@@ -329,9 +346,7 @@ class ParkingDashboard(QMainWindow):
         
         layout.addLayout(left_panel, stretch=1)
 
-        # R panel: display
         right_panel = QVBoxLayout()
-        
         right_panel.addWidget(QLabel("Member List"))
         self.table_members = QTableWidget()
         self.table_members.setColumnCount(4)
@@ -340,88 +355,42 @@ class ParkingDashboard(QMainWindow):
         self.table_members.cellClicked.connect(self.autofill_form) 
         
         right_panel.addWidget(self.table_members)
-        
         layout.addLayout(right_panel, stretch=2) 
         self.tab_management.setLayout(layout)
 
-    # Connect button function with database
-    # Data from table to input
     def autofill_form(self, row, column):
-        uid = self.table_members.item(row, 0).text()
-        plate = self.table_members.item(row, 1).text()
-        m_type = self.table_members.item(row, 2).text()
-        
-        self.input_uid.setText(uid)
-        self.input_plate.setText(plate)
-        self.input_type.setText(m_type)
+        self.input_uid.setText(self.table_members.item(row, 0).text())
+        self.input_plate.setText(self.table_members.item(row, 1).text())
+        self.input_type.setText(self.table_members.item(row, 2).text())
 
-    # Read data and display to table
     def handle_read(self):
         members_data = self.parking.read_all_members()
-        
         self.table_members.setRowCount(len(members_data))
-        
         for row_idx, row_data in enumerate(members_data):
             for col_idx, item_data in enumerate(row_data):
                 self.table_members.setItem(row_idx, col_idx, QTableWidgetItem(str(item_data)))
 
-    # Create new member
     def handle_create(self):
         uid = self.input_uid.text().strip()
         plate = self.input_plate.text().strip()
         m_type = self.input_type.text().strip()
-        
-        if not uid or not plate:
-            QMessageBox.warning(self, "[Warning]", "Please assign UID and license plate.")
-            return
-            
+        if not uid or not plate: return
         success, msg = self.parking.create_member(uid, plate, m_type)
-        if success:
-            QMessageBox.information(self, "[Success]", msg)
-            self.handle_read()
-            self.input_uid.clear()
-            self.input_plate.clear()
-        else:
-            QMessageBox.critical(self, "[Error]", msg)
+        if success: self.handle_read()
 
     def handle_update(self):
         uid = self.input_uid.text().strip()
         plate = self.input_plate.text().strip()
         m_type = self.input_type.text().strip()
-        
-        if not uid:
-            QMessageBox.warning(self, "[Warning]", "Please assign UID")
-            return
-            
+        if not uid: return
         success, msg = self.parking.update_member(uid, plate, m_type)
-        if success:
-            QMessageBox.information(self, "[Success]", msg)
-            self.handle_read()
-        else:
-            QMessageBox.critical(self, "[Error]", msg)
+        if success: self.handle_read()
 
     def handle_delete(self):
-        """ [D] ลบสมาชิก """
         uid = self.input_uid.text().strip()
-        
-        if not uid:
-            QMessageBox.warning(self, "[Warning]", "Please assign UID")
-            return
-
-        # confirm before delete
-        confirm = QMessageBox.question(
-            self, "[Delete confirmation]", f"Are you sure you want to delete UID {uid} ?\n(All of this UID parking logs will also be deleted)", 
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-        )
-        
-        if confirm == QMessageBox.StandardButton.Yes:
-            success, msg = self.parking.delete_member(uid)
-            if success:
-                QMessageBox.information(self, "[Success]", msg)
-                self.handle_read()
-                self.input_uid.clear()
-            else:
-                QMessageBox.critical(self, "[Error]", msg)
+        if not uid: return
+        success, msg = self.parking.delete_member(uid)
+        if success: self.handle_read()
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
