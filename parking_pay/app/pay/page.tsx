@@ -9,8 +9,15 @@ import { QRCodeSVG } from 'qrcode.react';
 import { 
   CheckCircle2, Clock, CreditCard, AlertCircle, RefreshCw, 
   Car, Nfc, ShieldCheck, History, Camera, ArrowRight, Lock, 
-  Copy, Download, MapPin, Receipt, Check, PhoneCall, HelpCircle, AlertTriangle, Calendar
+  Copy, Download, MapPin, Receipt, Check, PhoneCall, HelpCircle, AlertTriangle, Calendar, X
 } from 'lucide-react';
+
+interface HistoryItem {
+  time_in: string;
+  time_out: string;
+  status: string;
+  fee: number;
+}
 
 function PaymentContent() {
   const searchParams = useSearchParams();
@@ -22,7 +29,9 @@ function PaymentContent() {
   const [payCountdown, setPayCountdown] = useState(300);
   const [exitCountdown, setExitCountdown] = useState(900);
   const [entryTime, setEntryTime] = useState<string | null>(null);
-  const [entryImage, setEntryImage] = useState<string | null>(null); // <--- State สำหรับเก็บรูปกล้องจริง
+  const [entryImage, setEntryImage] = useState<string | null>(null);
+  const [parkingHistory, setParkingHistory] = useState<HistoryItem[]>([]);
+  const [showHistoryModal, setShowHistoryModal] = useState(false); // Modal State
   const [parkedSeconds, setParkedSeconds] = useState(0);
   const [copied, setCopied] = useState(false);
   const [extendedTime, setExtendedTime] = useState(false);
@@ -35,7 +44,7 @@ function PaymentContent() {
   const PROMPTPAY_ID = "0812345678"; 
   const qrPayload = generatePayload(PROMPTPAY_ID, { amount });
 
-  // 1. MQTT Listener
+  // 1. MQTT Connection (คลีนโค้ดส่วนเกินออกเรียบร้อย)
   useEffect(() => {
     const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
 
@@ -47,20 +56,22 @@ function PaymentContent() {
     client.on('message', (topic, message) => {
       try {
         const data = JSON.parse(message.toString());
-        if (data.status === 'success') {
+        
+        if (data.status === 'paid') {
+          // STEP 2: จ่ายเงินบนเว็บสำเร็จ -> เปลี่ยนเป็นหน้าแจ้งเตือนให้ไปแตะบัตรขาออก
           setStatus('success');
+        } else if (data.status === 'completed') {
+          // STEP 3: แตะบัตรขาออกที่ไม้กั้นเรียบร้อย -> เปลี่ยนเป็นหน้าใบเสร็จรับเงิน (จบรายการ)
+          setStatus('receipt');
         } else if (data.status === 'parked') {
+          // STEP 1: อยู่ระหว่างการจอดรถ
           setStatus('parked');
         }
 
-        if (data.time_in) {
-          setEntryTime(data.time_in);
-        }
+        if (data.time_in) setEntryTime(data.time_in);
+        if (data.image_base64) setEntryImage(data.image_base64);
+        if (data.history) setParkingHistory(data.history);
 
-        // รับรูปภาพ Base64 จาก Python
-        if (data.image_base64) {
-          setEntryImage(data.image_base64);
-        }
       } catch (e) {
         console.error('MQTT Message Error:', e);
       }
@@ -71,7 +82,7 @@ function PaymentContent() {
     };
   }, [uid]);
 
-  // 2. คำนวณระยะเวลาจอด
+  // 2. Real-time Timer
   useEffect(() => {
     if (status === 'success' || status === 'receipt' || status === 'sos') return;
 
@@ -95,7 +106,6 @@ function PaymentContent() {
     return () => clearInterval(interval);
   }, [entryTime, status]);
 
-  // ฟอร์แมตเวลาเข้าจอดให้อ่านง่าย (ข้อ 2)
   const formatEntryTimeDisplay = (timeStr: string | null) => {
     if (!timeStr) return "กำลังโหลดเวลา...";
     try {
@@ -257,7 +267,6 @@ function PaymentContent() {
           {status === 'parked' && (
             <div className="space-y-5">
               
-              {/* ระยะเวลา และ [ข้อ 2] แสดงเวลาเข้าจอดจริง */}
               <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
@@ -280,7 +289,6 @@ function PaymentContent() {
                   </div>
                 </div>
 
-                {/* [ข้อ 2] บรรทัดระบุเวลาเข้าจอดจริง */}
                 <div className="pt-2.5 border-t border-slate-800/80 flex items-center gap-2 text-xs text-slate-300">
                   <Calendar className="w-3.5 h-3.5 text-amber-400" />
                   <span>เวลาเข้าจอดจริง: <strong className="text-slate-100 font-mono">{formatEntryTimeDisplay(entryTime)}</strong></span>
@@ -299,7 +307,7 @@ function PaymentContent() {
                 </div>
               )}
 
-              {/* [ข้อ 1] ALPR Snapshot Preview - แสดงรูปกล้องจริง */}
+              {/* ALPR Snapshot Preview */}
               <div className="bg-slate-950 rounded-xl p-3 border border-slate-800 space-y-2">
                 <div className="flex items-center justify-between text-xs text-slate-400 px-1">
                   <span className="flex items-center gap-1"><Camera className="w-3.5 h-3.5 text-blue-400" /> ภาพถ่ายบันทึกขาเข้า (ALPR)</span>
@@ -507,15 +515,84 @@ function PaymentContent() {
 
         </div>
 
-        {/* Quick Actions */}
+        {/* Quick Actions (ปุ่มเปิด Modal ประวัติการแตะบัตร) */}
         <div className="grid grid-cols-2 gap-3 text-xs">
-          <button className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-400 py-2.5 rounded-xl flex items-center justify-center gap-2 transition">
-            <History className="w-3.5 h-3.5" /> ประวัติการแตะบัตร
+          <button 
+            onClick={() => setShowHistoryModal(true)}
+            className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-amber-400 font-medium py-2.5 rounded-xl flex items-center justify-center gap-2 transition shadow-lg shadow-amber-400/5"
+          >
+            <History className="w-3.5 h-3.5 text-amber-400" /> ประวัติการแตะบัตร
           </button>
           <button className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-rose-400/80 py-2.5 rounded-xl flex items-center justify-center gap-2 transition">
             <Lock className="w-3.5 h-3.5" /> อายัดบัตร NFC
           </button>
         </div>
+
+        {/* MODAL: POPUP แสดงประวัติการแตะบัตรย้อนหลัง */}
+        {showHistoryModal && (
+          <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-md p-5 space-y-4 shadow-2xl relative animate-in fade-in zoom-in duration-200">
+              
+              <div className="flex items-center justify-between pb-3 border-b border-slate-800">
+                <div className="flex items-center gap-2">
+                  <div className="p-1.5 bg-amber-400/10 rounded-lg text-amber-400">
+                    <History className="w-4 h-4" />
+                  </div>
+                  <h3 className="font-bold text-slate-100 text-sm">ประวัติการแตะบัตร (5 รายการล่าสุด)</h3>
+                </div>
+                <button 
+                  onClick={() => setShowHistoryModal(false)}
+                  className="p-1.5 text-slate-400 hover:text-slate-100 rounded-lg hover:bg-slate-800 transition"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              <div className="space-y-2.5 max-h-80 overflow-y-auto pr-1">
+                {parkingHistory.length === 0 ? (
+                  <div className="text-center text-slate-500 text-xs py-8 space-y-1">
+                    <p>ไม่พบประวัติการใช้งานย้อนหลัง</p>
+                    <p className="text-[10px] text-slate-600">สแกนเข้าจอดครั้งแรกในระบบ</p>
+                  </div>
+                ) : (
+                  parkingHistory.map((item, index) => (
+                    <div key={index} className="bg-slate-950 p-3 rounded-xl border border-slate-800/80 text-xs space-y-1.5 font-mono">
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400 font-sans">สถานะ:</span>
+                        <span className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                          item.status === 'parked' 
+                            ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' 
+                            : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                        }`}>
+                          {item.status === 'parked' ? 'กำลังจอดอยู่ (PARKED)' : 'ชำระแล้ว (COMPLETED)'}
+                        </span>
+                      </div>
+                      <div className="flex justify-between text-slate-300">
+                        <span className="text-slate-500 font-sans">เวลาเข้า:</span>
+                        <span>{item.time_in}</span>
+                      </div>
+                      <div className="flex justify-between text-slate-300">
+                        <span className="text-slate-500 font-sans">เวลาออก:</span>
+                        <span>{item.time_out !== '-' ? item.time_out : 'ยังไม่ออกจากลานจอด'}</span>
+                      </div>
+                      <div className="flex justify-between text-amber-400 font-bold pt-1.5 border-t border-slate-900">
+                        <span className="font-sans text-slate-400">ค่าบริการ:</span>
+                        <span>฿{item.fee.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  ))
+                )}
+              </div>
+
+              <button
+                onClick={() => setShowHistoryModal(false)}
+                className="w-full bg-slate-800 hover:bg-slate-700 text-slate-300 font-medium py-2.5 rounded-xl text-xs transition"
+              >
+                ปิดหน้าต่าง
+              </button>
+            </div>
+          </div>
+        )}
 
       </div>
     </div>
