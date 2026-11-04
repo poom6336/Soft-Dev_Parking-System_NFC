@@ -1,6 +1,6 @@
 'use client';
 
-// @ts-expect-error - promptpay-qr has no types
+// @ts-expect-error - promptpay-qr has no official typescript types
 import generatePayload from 'promptpay-qr';
 import React, { useState, useEffect, Suspense } from 'react';
 import mqtt from 'mqtt';
@@ -21,23 +21,107 @@ function PaymentContent() {
   const [status, setStatus] = useState<'parked' | 'paying' | 'success' | 'receipt' | 'sos'>('parked');
   const [payCountdown, setPayCountdown] = useState(300); // 5 นาทีสำหรับจ่ายเงิน
   const [exitCountdown, setExitCountdown] = useState(900); // 15 นาทีสำหรับขับออก
-  const [parkedSeconds, setParkedSeconds] = useState(5120); // จำลองเวลาจอด
+  const [entryTime, setEntryTime] = useState<string | null>(null);
+  const [parkedSeconds, setParkedSeconds] = useState(0);
   const [copied, setCopied] = useState(false);
   const [extendedTime, setExtendedTime] = useState(false);
   const [showBreakdown, setShowBreakdown] = useState(false);
 
-  const hoursParked = Math.ceil(parkedSeconds / 3600);
+  // คำนวณค่าบริการ (อย่างน้อย 1 ชั่วโมง)
+  const hoursParked = Math.max(1, Math.ceil(parkedSeconds / 3600));
   const ratePerHour = 20;
   const amount = hoursParked * ratePerHour;
 
-  // นับเวลาจอดจริง
+  // เบอร์ PromptPay ลานจอดรถ
+  const PROMPTPAY_ID = "0812345678"; 
+  const qrPayload = generatePayload(PROMPTPAY_ID, { amount });
+
+  // ===============================================================
+  // 1. MQTT Real-time Sync (เชื่อมต่อ Python & ขอเวลา time_in จาก DB)
+  // ===============================================================
+  useEffect(() => {
+    const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+
+    client.on('connect', () => {
+      console.log('MQTT Connected');
+      // ฟังข้อมูลสถานะเฉพาะ UID นี้
+      client.subscribe(`parking/status/${uid}`);
+      
+      // ส่งคำขอข้อมูลเวลาเข้าจอดจาก Python SQLite ทันทีที่โหลดหน้าเว็บ
+      client.publish('parking/request/status', JSON.stringify({ uid }));
+    });
+
+    client.on('message', (topic, message) => {
+      try {
+        const data = JSON.parse(message.toString());
+        if (data.status === 'success') {
+          setStatus('success');
+        } else if (data.status === 'parked') {
+          setStatus('parked');
+        }
+
+        // เมื่อได้รับเวลาเข้าจอดจริง (time_in) จาก Database
+        if (data.time_in) {
+          setEntryTime(data.time_in);
+        }
+      } catch (e) {
+        console.error('MQTT Message Error:', e);
+      }
+    });
+
+    return () => {
+      client.end();
+    };
+  }, [uid]);
+
+  // ===============================================================
+  // 2. คำนวณเวลาจอดจริง Real-time (เปรียบเทียบเวลา DB กับ เวลาปัจจุบัน)
+  // ===============================================================
   useEffect(() => {
     if (status === 'success' || status === 'receipt' || status === 'sos') return;
-    const interval = setInterval(() => {
+
+    const calculateDuration = () => {
+      if (entryTime) {
+        // ฟอร์แมตเวลาสตริงจาก SQLite ให้เป็น ISO Standard สำหรับ JS Date
+        const formattedTime = entryTime.includes('T') ? entryTime : entryTime.replace(' ', 'T');
+        const startMs = new Date(formattedTime).getTime();
+        const nowMs = Date.now();
+
+        if (!isNaN(startMs)) {
+          const diffSecs = Math.max(0, Math.floor((nowMs - startMs) / 1000));
+          setParkedSeconds(diffSecs);
+          return;
+        }
+      }
+      // ถ้ายังไม่ได้รับ time_in จาก DB ให้บวกเวลาจำลองทีละ 1 วินาทีไปก่อน
       setParkedSeconds((prev) => prev + 1);
-    }, 1000);
+    };
+
+    calculateDuration();
+    const interval = setInterval(calculateDuration, 1000);
     return () => clearInterval(interval);
-  }, [status]);
+  }, [entryTime, status]);
+
+  // ===============================================================
+  // 3. ส่งสัญญาณเปิดไม้กั้นไปที่ Python ผ่าน MQTT เมื่อกดชำระเงิน
+  // ===============================================================
+  const handleConfirmPayment = () => {
+    try {
+      const client = mqtt.connect('wss://broker.emqx.io:8084/mqtt');
+      client.on('connect', () => {
+        client.publish(`parking/gate/exit`, JSON.stringify({ 
+          uid, 
+          status: 'OPEN_GATE', 
+          amount,
+          licensePlate 
+        }));
+        client.end();
+      });
+    } catch (e) {
+      console.error('MQTT Publish Error:', e);
+    }
+    setStatus('success');
+  };
 
   // นับถอยหลังจ่ายเงิน
   useEffect(() => {
@@ -70,31 +154,29 @@ function PaymentContent() {
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
+  // คัดลอกข้อความ PromptPay (รองรับ HTTP / IP วง LAN)
   const handleCopyPromptPay = async () => {
-  const textToCopy = `00020101021229370016A000000677010111031500000000000005802TH5303764540${amount}.00580...`; // ใช้สตริงเดิมของคุณ
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(qrPayload);
+      } else {
+        const textArea = document.createElement("textarea");
+        textArea.value = qrPayload;
+        textArea.style.position = "fixed";
+        textArea.style.left = "-999999px";
+        document.body.appendChild(textArea);
+        textArea.focus();
+        textArea.select();
+        document.execCommand("copy");
+        textArea.remove();
+      }
 
-  try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(textToCopy);
-    } else {
-      // Fallback สำหรับ HTTP / IP ในวง LAN (192.168.1.167)
-      const textArea = document.createElement("textarea");
-      textArea.value = textToCopy;
-      textArea.style.position = "fixed";
-      textArea.style.left = "-999999px";
-      document.body.appendChild(textArea);
-      textArea.focus();
-      textArea.select();
-      document.execCommand("copy");
-      textArea.remove();
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch (err) {
+      console.error("Failed to copy text: ", err);
     }
-
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
-  } catch (err) {
-    console.error("Failed to copy text: ", err);
-  }
-};
+  };
 
   const handleExtendGracePeriod = () => {
     if (!extendedTime) {
@@ -196,7 +278,7 @@ function PaymentContent() {
               {/* Fee Breakdown Drawer */}
               {showBreakdown && (
                 <div className="bg-slate-950/80 p-3.5 rounded-xl border border-slate-800 text-xs space-y-1.5 font-mono text-slate-300">
-                  <div className="flex justify-between"><span>เวลาเข้าจอด:</span><span>14:00 น.</span></div>
+                  <div className="flex justify-between"><span>เวลาเข้าจอด:</span><span>{entryTime ? entryTime.split(' ')[1] || entryTime : '14:00 น.'}</span></div>
                   <div className="flex justify-between"><span>คำนวณเวลา:</span><span>{hoursParked} ชม. (ปัดเศษขึ้น)</span></div>
                   <div className="flex justify-between"><span>อัตราต่อชั่วโมง:</span><span>฿20.00</span></div>
                   <div className="flex justify-between text-amber-400 font-bold pt-1 border-t border-slate-800">
@@ -238,7 +320,7 @@ function PaymentContent() {
             </div>
           )}
 
-          {/* STATE 2: PAYING (Mobile QR & Copy Code) */}
+          {/* STATE 2: PAYING */}
           {status === 'paying' && (
             <div className="flex flex-col items-center text-center space-y-4">
               <div className="bg-slate-950 p-4 rounded-xl border border-slate-800 w-full flex justify-between items-center">
@@ -247,14 +329,15 @@ function PaymentContent() {
                   <p className="text-xl font-bold text-amber-400 font-mono">฿{amount}.00</p>
                 </div>
                 <div className="bg-blue-500/10 text-blue-400 px-3 py-1 rounded-full text-xs font-semibold">
-                  PromptPay QR
+                  PromptPay Dynamic QR
                 </div>
               </div>
 
               <div className="bg-white p-4 rounded-2xl shadow-2xl border-4 border-amber-400/20">
                 <QRCodeSVG 
-                  value={`00020101021229370016A000000677010111031500000000000005802TH5303764540${amount}.005802TH6304`} 
+                  value={qrPayload} 
                   size={170} 
+                  includeMargin={true}
                 />
               </div>
 
@@ -273,10 +356,10 @@ function PaymentContent() {
 
               <div className="w-full pt-2 space-y-2">
                 <button
-                  onClick={() => setStatus('success')}
-                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl transition text-sm flex items-center justify-center gap-2"
+                  onClick={handleConfirmPayment}
+                  className="w-full bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-bold py-3 rounded-xl transition text-sm flex items-center justify-center gap-2 shadow-lg shadow-emerald-500/20"
                 >
-                  <CreditCard className="w-4 h-4" /> [จำลอง] กดเพื่อชำระเงินสำเร็จ
+                  <CreditCard className="w-4 h-4" /> ยืนยันชำระเงิน (ส่งสัญญาณเปิดไม้กั้น)
                 </button>
                 <button
                   onClick={() => setStatus('parked')}
@@ -288,7 +371,7 @@ function PaymentContent() {
             </div>
           )}
 
-          {/* STATE 3: SUCCESS (Solving Exit Traffic Queue Pain Point) */}
+          {/* STATE 3: SUCCESS */}
           {status === 'success' && (
             <div className="flex flex-col items-center text-center py-2 space-y-4">
               <div className="w-14 h-14 bg-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center border border-emerald-500/30">
@@ -296,17 +379,16 @@ function PaymentContent() {
               </div>
               <div>
                 <h2 className="text-xl font-bold text-emerald-400">ชำระเงินสำเร็จแล้ว!</h2>
-                <p className="text-xs text-slate-300 mt-0.5">นำบัตร NFC ไปแตะออกที่หัวอ่าน PN532 ได้เลย</p>
+                <p className="text-xs text-slate-300 mt-0.5">ระบบส่งสัญญาณเปิดไม้กั้นขาออกเรียบร้อยแล้ว</p>
               </div>
 
-              {/* Grace Period Countdown & Extension Option */}
+              {/* Grace Period Countdown */}
               <div className="w-full bg-slate-950 p-4 rounded-xl border border-amber-400/30 space-y-2">
                 <span className="text-xs text-slate-400 block">เวลาที่เหลือในการนำรถออก (Grace Period)</span>
                 <div className="text-3xl font-extrabold text-amber-400 font-mono">
                   {formatClock(exitCountdown)}
                 </div>
                 
-                {/* Traffic Extension Button */}
                 <button
                   onClick={handleExtendGracePeriod}
                   disabled={extendedTime}
@@ -378,7 +460,7 @@ function PaymentContent() {
             </div>
           )}
 
-          {/* STATE 5: SOS / HARDWARE FAILURE OVERRIDE */}
+          {/* STATE 5: SOS */}
           {status === 'sos' && (
             <div className="space-y-4 text-center py-2">
               <div className="w-12 h-12 bg-rose-500/20 text-rose-400 rounded-full flex items-center justify-center mx-auto border border-rose-500/30">
@@ -389,7 +471,6 @@ function PaymentContent() {
                 <p className="text-xs text-slate-400 mt-1">กรณีแตะบัตร NFC แล้วไม้กั้นไม่เปิด หรือเครื่องอ่านมีปัญหา</p>
               </div>
 
-              {/* Emergency Pass Display */}
               <div className="bg-slate-950 p-4 rounded-xl border border-rose-500/30 space-y-3">
                 <p className="text-xs text-slate-300">แสดง QR ฉุกเฉินนี้แก่ รปภ. หรือกล้องสแกนเพื่อเปิดไม้กั้น:</p>
                 <div className="bg-white p-3 rounded-lg w-fit mx-auto">
