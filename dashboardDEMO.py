@@ -103,6 +103,9 @@ class ParkingDashboard(QMainWindow):
         self.parking.register_member('A1B2C3D4', 'BKK-1234')
         self.parking.register_member('E5F6G7H8', 'SK-9999', 'vip')
 
+        # Parking Lot Capacity Settings
+        self.total_capacity = 50
+
         self.is_reading_ntag = False
 
         self.pub_client = mqtt.Client()
@@ -113,7 +116,7 @@ class ParkingDashboard(QMainWindow):
             print(f"MQTT Pub Connect Error: {e}")
 
         self.setWindowTitle("SMART PARKING TERMINAL")
-        self.resize(1150, 650)
+        self.resize(1150, 700)
 
         self.setStyleSheet("""
             QMainWindow, QWidget#tab_bg { background-color: #1E1E2E; }
@@ -182,6 +185,7 @@ class ParkingDashboard(QMainWindow):
     
         self.handle_read()
         self.handle_read_logs()
+        self.update_capacity_display()
 
         self.log_message("SYSTEM INITIALIZED. READY.")
         
@@ -194,11 +198,46 @@ class ParkingDashboard(QMainWindow):
         self.mqtt_thread.start()
 
     def setup_dashboard_tab(self):
+        container_layout = QVBoxLayout()
+
+        # --- Top Capacity Status Cards ---
+        capacity_layout = QHBoxLayout()
+
+        self.card_total = QLabel("TOTAL SLOTS\n50")
+        self.card_total.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.card_total.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.card_total.setStyleSheet("""
+            background-color: #313244; color: #89B4FA; 
+            border-radius: 10px; padding: 10px; margin-bottom: 5px;
+        """)
+
+        self.card_parked = QLabel("OCCUPIED\n0")
+        self.card_parked.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.card_parked.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.card_parked.setStyleSheet("""
+            background-color: #313244; color: #FAB387; 
+            border-radius: 10px; padding: 10px; margin-bottom: 5px;
+        """)
+
+        self.card_available = QLabel("AVAILABLE SLOTS\n50")
+        self.card_available.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.card_available.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        self.card_available.setStyleSheet("""
+            background-color: #A6E3A1; color: #11111B; 
+            border-radius: 10px; padding: 10px; margin-bottom: 5px;
+        """)
+
+        capacity_layout.addWidget(self.card_total)
+        capacity_layout.addWidget(self.card_parked)
+        capacity_layout.addWidget(self.card_available)
+        container_layout.addLayout(capacity_layout)
+
+        # --- Main Live Split View ---
         main_layout = QHBoxLayout()
         left_layout = QVBoxLayout()
 
         self.plate_label = QLabel("Waiting for user")
-        self.plate_label.setFont(QFont("Segoe UI", 24, QFont.Weight.Bold))
+        self.plate_label.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
         self.plate_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.plate_label.setStyleSheet("""
             background-color: #313244;
@@ -217,7 +256,7 @@ class ParkingDashboard(QMainWindow):
             border: 2px dashed #45475A;
             border-radius: 12px;
         """)
-        self.image_display.setFixedSize(450, 320)
+        self.image_display.setFixedSize(450, 300)
 
         left_layout.addWidget(self.plate_label)
         left_layout.addWidget(self.image_display)
@@ -252,7 +291,44 @@ class ParkingDashboard(QMainWindow):
         right_layout.addLayout(btn_layout)
 
         main_layout.addLayout(right_layout)
-        self.tab_dashboard.setLayout(main_layout)
+        container_layout.addLayout(main_layout)
+
+        self.tab_dashboard.setLayout(container_layout)
+
+    def update_capacity_display(self):
+        """ Calculate & Update capacity UI cards and broadcast via MQTT """
+        try:
+            self.parking.cursor.execute("SELECT COUNT(*) FROM parking_logs WHERE status = 'parked'")
+            parked_count = self.parking.cursor.fetchone()[0]
+            available_slots = max(0, self.total_capacity - parked_count)
+
+            self.card_total.setText(f"TOTAL CAPACITY\n{self.total_capacity} Slots")
+            self.card_parked.setText(f"OCCUPIED\n{parked_count} Vehicles")
+            self.card_available.setText(f"AVAILABLE SLOTS\n{available_slots} Slots")
+
+            if available_slots == 0:
+                self.card_available.setText("PARKING FULL\n0 Slots Left")
+                self.card_available.setStyleSheet("""
+                    background-color: #F38BA8; color: #11111B; 
+                    border-radius: 10px; padding: 10px; margin-bottom: 5px; font-weight: bold;
+                """)
+            else:
+                self.card_available.setStyleSheet("""
+                    background-color: #A6E3A1; color: #11111B; 
+                    border-radius: 10px; padding: 10px; margin-bottom: 5px; font-weight: bold;
+                """)
+
+            # Broadcast capacity data via MQTT
+            capacity_payload = json.dumps({
+                "total": self.total_capacity,
+                "parked": parked_count,
+                "available": available_slots,
+                "is_full": available_slots == 0
+            })
+            self.pub_client.publish("parking/capacity/live", capacity_payload)
+
+        except Exception as e:
+            self.log_message(f"Error updating capacity: {e}")
 
     def setup_management_tab(self):
         layout = QHBoxLayout()
@@ -320,12 +396,10 @@ class ParkingDashboard(QMainWindow):
         title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
         title.setStyleSheet("color: #89B4FA;")
 
-        # Search bar for filtering UID or License Plate
         self.input_log_search = QLineEdit()
         self.input_log_search.setPlaceholderText("Filter Plate / UID...")
         self.input_log_search.textChanged.connect(self.handle_read_logs)
 
-        # Dropdown filter for parking status
         self.combo_status_filter = QComboBox()
         self.combo_status_filter.addItems(["All Status", "parked", "paid", "completed"])
         self.combo_status_filter.currentTextChanged.connect(self.handle_read_logs)
@@ -334,7 +408,6 @@ class ParkingDashboard(QMainWindow):
         btn_refresh_logs.setFixedWidth(100)
         btn_refresh_logs.clicked.connect(self.handle_read_logs)
 
-        # Export CSV Button
         btn_export_csv = QPushButton("📥 Export CSV")
         btn_export_csv.setStyleSheet("background-color: #A6E3A1; color: #11111B;")
         btn_export_csv.setFixedWidth(120)
@@ -399,6 +472,8 @@ class ParkingDashboard(QMainWindow):
                     item = QTableWidgetItem(value)
                     item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
                     self.table_logs.setItem(row_idx, col_idx, item)
+
+            self.update_capacity_display()
 
         except Exception as e:
             self.log_message(f"Error reading parking logs: {e}")
@@ -504,6 +579,17 @@ class ParkingDashboard(QMainWindow):
                 self.send_user_status(uid)
 
             elif current_status is None or current_status == 'completed':
+                # --- PARKING CAPACITY CHECK BEFORE ENTRY ---
+                self.parking.cursor.execute("SELECT COUNT(*) FROM parking_logs WHERE status = 'parked'")
+                currently_parked = self.parking.cursor.fetchone()[0]
+
+                if currently_parked >= self.total_capacity:
+                    self.log_message(f"🔴 [ENTRY DENIED] Parking is FULL ({currently_parked}/{self.total_capacity}). UID: {uid}")
+                    self.plate_label.setText(f"PARKING FULL!\nENTRY DENIED")
+                    self.plate_label.setStyleSheet("background-color: #F38BA8; color: #11111B; border-radius: 10px; padding: 15px;")
+                    self.update_capacity_display()
+                    return
+
                 scan_result_message = self.parking.handle_scan(uid)
                 self.log_message(f"🚘 [ENTRY SCAN] {scan_result_message}")
                 self.update_image(uid)
@@ -516,6 +602,7 @@ class ParkingDashboard(QMainWindow):
                 self.send_user_status(uid)
 
             self.handle_read_logs()
+            self.update_capacity_display()
 
         except Exception as e:
             self.log_message(f"Error in process_scan: {e}")
@@ -540,6 +627,7 @@ class ParkingDashboard(QMainWindow):
             
             self.send_user_status(uid)
             self.handle_read_logs()
+            self.update_capacity_display()
 
         except Exception as e:
             self.log_message(f"Error processing payment: {e}")
