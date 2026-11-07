@@ -13,11 +13,12 @@ from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from parkSysDemo import ParkingSys
 
+
 class MQTTListenerThread(QThread):
     card_scanned = pyqtSignal(str)
     status_requested = pyqtSignal(str)
     gate_exit_requested = pyqtSignal(str, float)
-    search_requested = pyqtSignal(str, str)  # (query, requestId)
+    search_requested = pyqtSignal(str, str)
     log_msg = pyqtSignal(str)
 
     def __init__(self, broker_address="broker.emqx.io"):
@@ -101,6 +102,9 @@ class ParkingDashboard(QMainWindow):
         self.parking.register_member('A1B2C3D4', 'กท-1234')
         self.parking.register_member('E5F6G7H8', 'สข-9999', 'vip')
 
+        # ตัวแปรสถานะรอแตะ NTAG สำหรับลงทะเบียน
+        self.is_reading_ntag = False
+
         self.pub_client = mqtt.Client()
         try:
             self.pub_client.connect("broker.emqx.io", 1883, 60)
@@ -173,6 +177,8 @@ class ParkingDashboard(QMainWindow):
         self.handle_read()
 
         self.log_message("SYSTEM INITIALIZED. READY.")
+        
+        # เริ่มต้น MQTT Thread สำหรับรับข้อมูลจาก ESP32
         self.mqtt_thread = MQTTListenerThread(broker_address="broker.emqx.io")
         self.mqtt_thread.card_scanned.connect(self.process_scan)
         self.mqtt_thread.status_requested.connect(self.send_user_status)
@@ -242,12 +248,131 @@ class ParkingDashboard(QMainWindow):
         main_layout.addLayout(right_layout)
         self.tab_dashboard.setLayout(main_layout)
 
+    def setup_management_tab(self):
+        layout = QHBoxLayout()
+        left_panel = QVBoxLayout()
+        left_panel.addWidget(QLabel("Database management", font=QFont("Segoe UI", 12, QFont.Weight.Bold)))
+        
+        form_layout = QFormLayout()
+
+        # ส่วนช่อง UID + ปุ่มกดรอรับค่าจาก ESP32 ผ่าน MQTT
+        uid_input_layout = QHBoxLayout()
+        self.input_uid = QLineEdit()
+        self.input_uid.setPlaceholderText("Fill UID or tap NTAG")
+        
+        self.btn_read_ntag = QPushButton("📡 แตะ NTAG เพื่ออ่าน UID")
+        self.btn_read_ntag.setStyleSheet("background-color: #FAB387; color: #11111B;")
+        self.btn_read_ntag.clicked.connect(self.toggle_ntag_read_mode)
+
+        uid_input_layout.addWidget(self.input_uid)
+        uid_input_layout.addWidget(self.btn_read_ntag)
+
+        self.input_plate = QLineEdit()
+        self.input_plate.setPlaceholderText("Fill license plate")
+        self.input_type = QLineEdit()
+        self.input_type.setText("regular")
+        
+        form_layout.addRow("UID:", uid_input_layout)
+        form_layout.addRow("License plate:", self.input_plate)
+        form_layout.addRow("Type:", self.input_type)
+        left_panel.addLayout(form_layout)
+        
+        btn_create = QPushButton("Add new member")
+        btn_create.clicked.connect(self.handle_create)
+        btn_update = QPushButton("Update data")
+        btn_update.clicked.connect(self.handle_update)
+        btn_delete = QPushButton("Delete member")
+        btn_delete.clicked.connect(self.handle_delete)
+        btn_read = QPushButton("Refresh table")
+        btn_read.clicked.connect(self.handle_read)
+
+        left_panel.addWidget(btn_create)
+        left_panel.addWidget(btn_update)
+        left_panel.addWidget(btn_delete)
+        left_panel.addSpacing(20)
+        left_panel.addWidget(btn_read)
+        left_panel.addStretch() 
+        
+        layout.addLayout(left_panel, stretch=1)
+
+        right_panel = QVBoxLayout()
+        right_panel.addWidget(QLabel("Member List"))
+        self.table_members = QTableWidget()
+        self.table_members.setColumnCount(4)
+        self.table_members.setHorizontalHeaderLabels(["UID", "License Plate", "Type", "Registration Date"])
+        self.table_members.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        self.table_members.cellClicked.connect(self.autofill_form) 
+        
+        right_panel.addWidget(self.table_members)
+        layout.addLayout(right_panel, stretch=2) 
+        self.tab_management.setLayout(layout)
+
+    def toggle_ntag_read_mode(self):
+        self.is_reading_ntag = not self.is_reading_ntag
+        if self.is_reading_ntag:
+            self.btn_read_ntag.setText("Waitng for NTAG...")
+            self.btn_read_ntag.setStyleSheet("background-color: #F9E2AF; color: #11111B;")
+            self.log_message("[NTAG READ MODE] Please scan NTAG...")
+        else:
+            self.btn_read_ntag.setText("Scan NTAG for UID")
+            self.btn_read_ntag.setStyleSheet("background-color: #FAB387; color: #11111B;")
+            self.log_message("Cancel NTAG reading")
+
+    def process_scan(self, uid):
+        if self.is_reading_ntag:
+            self.input_uid.setText(uid)
+            self.is_reading_ntag = False
+            self.btn_read_ntag.setText("Scan NTAG for UID")
+            self.btn_read_ntag.setStyleSheet("background-color: #FAB387; color: #11111B;")
+            self.tabs.setCurrentIndex(1)
+            self.log_message(f"[NTAG CAPTURED] UID: {uid}")
+            return
+
+        self.log_message(f"\nNFC read: {uid}")
+        try:
+            query = "SELECT log_id, status FROM parking_logs WHERE uid = ? ORDER BY log_id DESC LIMIT 1"
+            self.parking.cursor.execute(query, (uid,))
+            row = self.parking.cursor.fetchone()
+            
+            last_log_id = row[0] if row else None
+            current_status = row[1] if row else None
+
+            if current_status == 'paid':
+                now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                update_query = """
+                    UPDATE parking_logs 
+                    SET status = 'completed', time_out = ? 
+                    WHERE log_id = ?
+                """
+                self.parking.cursor.execute(update_query, (now_str, last_log_id))
+                self.parking.conn.commit()
+
+                self.log_message(f"🟢 [GATE OPEN] UID: {uid} - Scanned OUT at {now_str}. STATUS: COMPLETED")
+                self.plate_label.setText(f"GATE OPEN - HAVE A SAFE TRIP!\n{uid}")
+                self.plate_label.setStyleSheet("background-color: #A6E3A1; color: #11111B; border-radius: 10px; padding: 15px;")
+                
+                self.send_user_status(uid)
+
+            elif current_status is None or current_status == 'completed':
+                scan_result_message = self.parking.handle_scan(uid)
+                self.log_message(f"[ENTRY SCAN] {scan_result_message}")
+                self.update_image(uid)
+                self.send_user_status(uid)
+
+            elif current_status == 'parked':
+                self.log_message(f"🔴 [GATE CLOSED] UID: {uid} - Payment required before exit!")
+                self.plate_label.setText(f"PLEASE PAY FIRST!\n{uid}")
+                self.plate_label.setStyleSheet("background-color: #F38BA8; color: #11111B; border-radius: 10px; padding: 15px;")
+                self.send_user_status(uid)
+
+        except Exception as e:
+            self.log_message(f"Error in process_scan: {e}")
+
     def log_message(self, text):
         self.log_text.append(text)
         self.log_text.verticalScrollBar().setValue(self.log_text.verticalScrollBar().maximum())
 
     def process_exit(self, uid, amount):
-        """ STEP 2: เมื่อกดชำระเงินบนหน้าเว็บ -> เปลี่ยนสถานะเป็น 'paid' """
         try:
             query = """
                 UPDATE parking_logs 
@@ -266,53 +391,7 @@ class ParkingDashboard(QMainWindow):
         except Exception as e:
             self.log_message(f"Error processing payment: {e}")
 
-    def process_scan(self, uid):
-        """ STEP 1 & 3: ประมวลผลการแตะบัตร NFC ที่ตู้ทางเข้า-ทางออก """
-        self.log_message(f"\nNFC read: {uid}")
-        try:
-            query = "SELECT log_id, status FROM parking_logs WHERE uid = ? ORDER BY log_id DESC LIMIT 1"
-            self.parking.cursor.execute(query, (uid,))
-            row = self.parking.cursor.fetchone()
-            
-            last_log_id = row[0] if row else None
-            current_status = row[1] if row else None
-
-            # 🟢 เคส A: แตะบัตรขาออก โดยที่ "ชำระเงินบนเว็บเรียบร้อยแล้ว" (status = 'paid')
-            if current_status == 'paid':
-                now_str = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                update_query = """
-                    UPDATE parking_logs 
-                    SET status = 'completed', time_out = ? 
-                    WHERE log_id = ?
-                """
-                self.parking.cursor.execute(update_query, (now_str, last_log_id))
-                self.parking.conn.commit()
-
-                self.log_message(f"🟢 [GATE OPEN] UID: {uid} - Scanned OUT at {now_str}. STATUS: COMPLETED")
-                self.plate_label.setText(f"GATE OPEN - HAVE A SAFE TRIP!\n{uid}")
-                self.plate_label.setStyleSheet("background-color: #A6E3A1; color: #11111B; border-radius: 10px; padding: 15px;")
-                
-                self.send_user_status(uid)
-
-            # 🚘 เคส B: แตะบัตรขาเข้า (ยังไม่มีข้อมูล หรือ จอดรอบก่อนจบ 'completed' ไปแล้ว)
-            elif current_status is None or current_status == 'completed':
-                scan_result_message = self.parking.handle_scan(uid)
-                self.log_message(f"🚘 [ENTRY SCAN] {scan_result_message}")
-                self.update_image(uid)
-                self.send_user_status(uid)
-
-            # 🔴 เคส C: แตะบัตรขาออก แต่ "ยังไม่ได้ชำระเงิน" (status = 'parked')
-            elif current_status == 'parked':
-                self.log_message(f"🔴 [GATE CLOSED] UID: {uid} - Payment required before exit!")
-                self.plate_label.setText(f"PLEASE PAY FIRST!\n{uid}")
-                self.plate_label.setStyleSheet("background-color: #F38BA8; color: #11111B; border-radius: 10px; padding: 15px;")
-                self.send_user_status(uid)
-
-        except Exception as e:
-            self.log_message(f"Error in process_scan: {e}")
-
     def process_search(self, search_query, request_id):
-        """ ค้นหา UID จากทะเบียนรถ หรือ UID ล่าสุดในฐานข้อมูล """
         try:
             query_str = f"%{search_query}%"
             sql = """
@@ -335,11 +414,11 @@ class ParkingDashboard(QMainWindow):
                     "plate": plate,
                     "status": status
                 })
-                self.log_message(f"🔍 [SEARCH MATCH] Query: '{search_query}' -> Found UID: {uid} ({plate})")
+                self.log_message(f"[SEARCH MATCH] Query: '{search_query}' -> Found UID: {uid} ({plate})")
             else:
                 payload = json.dumps({
                     "found": False,
-                    "message": f"ไม่พบข้อมูลรถทะเบียน '{search_query}' ในระบบจอดรถขณะนี้"
+                    "message": f"License plate '{search_query}' not found"
                 })
                 self.log_message(f"🔍 [SEARCH NOT FOUND] Query: '{search_query}'")
 
@@ -349,7 +428,6 @@ class ParkingDashboard(QMainWindow):
             self.log_message(f"Error processing search: {e}")
 
     def send_user_status(self, uid):
-        """ ดึงข้อมูลเวลา, รูปภาพ, และประวัติย้อนหลัง 5 รายการจาก SQLite ส่งไป Next.js """
         try:
             query = """
                 SELECT m.license_plate, l.status, l.time_in, l.image_path 
@@ -442,54 +520,6 @@ class ParkingDashboard(QMainWindow):
             self.pub_client.disconnect()
         event.accept()
 
-    def setup_management_tab(self):
-        layout = QHBoxLayout()
-        left_panel = QVBoxLayout()
-        left_panel.addWidget(QLabel("Database management", font=QFont("Segoe UI", 12, QFont.Weight.Bold)))
-        
-        form_layout = QFormLayout()
-        self.input_uid = QLineEdit()
-        self.input_uid.setPlaceholderText("Fill UID")
-        self.input_plate = QLineEdit()
-        self.input_plate.setPlaceholderText("Fill license plate")
-        self.input_type = QLineEdit()
-        self.input_type.setText("regular")
-        
-        form_layout.addRow("UID:", self.input_uid)
-        form_layout.addRow("License plate:", self.input_plate)
-        form_layout.addRow("Type:", self.input_type)
-        left_panel.addLayout(form_layout)
-        
-        btn_create = QPushButton("Add new member")
-        btn_create.clicked.connect(self.handle_create)
-        btn_update = QPushButton("Update data")
-        btn_update.clicked.connect(self.handle_update)
-        btn_delete = QPushButton("Delete member")
-        btn_delete.clicked.connect(self.handle_delete)
-        btn_read = QPushButton("Refresh table")
-        btn_read.clicked.connect(self.handle_read)
-
-        left_panel.addWidget(btn_create)
-        left_panel.addWidget(btn_update)
-        left_panel.addWidget(btn_delete)
-        left_panel.addSpacing(20)
-        left_panel.addWidget(btn_read)
-        left_panel.addStretch() 
-        
-        layout.addLayout(left_panel, stretch=1)
-
-        right_panel = QVBoxLayout()
-        right_panel.addWidget(QLabel("Member List"))
-        self.table_members = QTableWidget()
-        self.table_members.setColumnCount(4)
-        self.table_members.setHorizontalHeaderLabels(["UID", "License Plate", "Type", "Registration Date"])
-        self.table_members.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self.table_members.cellClicked.connect(self.autofill_form) 
-        
-        right_panel.addWidget(self.table_members)
-        layout.addLayout(right_panel, stretch=2) 
-        self.tab_management.setLayout(layout)
-
     def autofill_form(self, row, column):
         self.input_uid.setText(self.table_members.item(row, 0).text())
         self.input_plate.setText(self.table_members.item(row, 1).text())
@@ -508,7 +538,11 @@ class ParkingDashboard(QMainWindow):
         m_type = self.input_type.text().strip()
         if not uid or not plate: return
         success, msg = self.parking.create_member(uid, plate, m_type)
-        if success: self.handle_read()
+        if success: 
+            self.log_message(f"✅ {msg}")
+            self.handle_read()
+        else:
+            self.log_message(f"❌ {msg}")
 
     def handle_update(self):
         uid = self.input_uid.text().strip()
@@ -523,6 +557,7 @@ class ParkingDashboard(QMainWindow):
         if not uid: return
         success, msg = self.parking.delete_member(uid)
         if success: self.handle_read()
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
