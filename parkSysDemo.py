@@ -269,8 +269,6 @@ class ParkingSys:
         
         return filename
 
-
-
 #camera class
 class CameraStream:
     def __init__(self, src=0):
@@ -332,6 +330,6 @@ if __name__ == "__main__":
     parking = ParkingSys('parking.db')
     parking.create_tables()
     
-    parking.register_member('A1B2C3D4', 'กท-2058')
+    parking.register_member('A1B2C3D4', '5กข-2662')
     uid_from_nfc = 'A1B2C3D4'
     parking.handle_scan(uid_from_nfc)
