@@ -4,11 +4,12 @@ import time
 import json
 import base64
 import datetime
+import csv
 import paho.mqtt.client as mqtt
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QLabel, QPushButton, QTextEdit, 
                              QFormLayout, QLineEdit, QTableWidget, QHeaderView,
-                             QTableWidgetItem, QTabWidget)
+                             QTableWidgetItem, QTabWidget, QFileDialog, QComboBox)
 from PyQt6.QtGui import QPixmap, QFont
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
 from parkSysDemo import ParkingSys
@@ -29,13 +30,13 @@ class MQTTListenerThread(QThread):
 
     def on_connect(self, client, userdata, flags, rc):
         if rc == 0:
-            self.log_msg.emit(f"Connect to MQTT Broker: {self.broker} success")
+            self.log_msg.emit(f"Connected to MQTT Broker: {self.broker} successfully")
             self.client.subscribe("parking/entry/scan")
             self.client.subscribe("parking/request/status")
             self.client.subscribe("parking/gate/exit")
             self.client.subscribe("parking/search/request")
         else:
-            self.log_msg.emit(f"Fail to connect to MQTT (code: {rc})")
+            self.log_msg.emit(f"Failed to connect to MQTT (code: {rc})")
 
     def on_message(self, client, userdata, msg):
         topic = msg.topic
@@ -99,10 +100,9 @@ class ParkingDashboard(QMainWindow):
         self.parking = ParkingSys('parking.db')
         self.parking.create_tables()
 
-        self.parking.register_member('A1B2C3D4', 'กท-1234')
-        self.parking.register_member('E5F6G7H8', 'สข-9999', 'vip')
+        self.parking.register_member('A1B2C3D4', 'BKK-1234')
+        self.parking.register_member('E5F6G7H8', 'SK-9999', 'vip')
 
-        # ตัวแปรสถานะรอแตะ NTAG สำหรับลงทะเบียน
         self.is_reading_ntag = False
 
         self.pub_client = mqtt.Client()
@@ -113,12 +113,12 @@ class ParkingDashboard(QMainWindow):
             print(f"MQTT Pub Connect Error: {e}")
 
         self.setWindowTitle("SMART PARKING TERMINAL")
-        self.resize(1000, 600)
+        self.resize(1150, 650)
 
         self.setStyleSheet("""
             QMainWindow, QWidget#tab_bg { background-color: #1E1E2E; }
             QLabel { color: #CDD6F4; }
-            QTextEdit, QLineEdit, QTableWidget {
+            QTextEdit, QLineEdit, QTableWidget, QComboBox {
                 background-color: #181825;
                 color: #A6E3A1;
                 border: 1px solid #45475A;
@@ -130,7 +130,8 @@ class ParkingDashboard(QMainWindow):
                 background-color: #313244;
                 color: #CDD6F4;
                 border: none;
-                padding: 4px;
+                padding: 6px;
+                font-weight: bold;
             }
             QPushButton {
                 background-color: #89B4FA;
@@ -167,18 +168,23 @@ class ParkingDashboard(QMainWindow):
         
         self.tab_management = QWidget()
         self.tab_management.setObjectName("tab_bg")
+
+        self.tab_logs = QWidget()
+        self.tab_logs.setObjectName("tab_bg")
         
         self.tabs.addTab(self.tab_dashboard, "🎥 Live Dashboard")
         self.tabs.addTab(self.tab_management, "⚙️ Database Management")
+        self.tabs.addTab(self.tab_logs, "📋 Parking Logs")
 
         self.setup_dashboard_tab()
         self.setup_management_tab()
+        self.setup_logs_tab()
     
         self.handle_read()
+        self.handle_read_logs()
 
         self.log_message("SYSTEM INITIALIZED. READY.")
         
-        # เริ่มต้น MQTT Thread สำหรับรับข้อมูลจาก ESP32
         self.mqtt_thread = MQTTListenerThread(broker_address="broker.emqx.io")
         self.mqtt_thread.card_scanned.connect(self.process_scan)
         self.mqtt_thread.status_requested.connect(self.send_user_status)
@@ -230,11 +236,11 @@ class ParkingDashboard(QMainWindow):
         self.log_text.setFont(QFont("Consolas", 10))
 
         btn_layout = QHBoxLayout()
-        btn_scan_car1 = QPushButton("Scan: กท-1234")
+        btn_scan_car1 = QPushButton("Scan: BKK-1234")
         btn_scan_car1.setStyleSheet("background-color: #CBA6F7;")
         btn_scan_car1.clicked.connect(lambda: self.simulate_scan('A1B2C3D4'))
 
-        btn_scan_car2 = QPushButton("Scan: สข-9999")
+        btn_scan_car2 = QPushButton("Scan: SK-9999")
         btn_scan_car2.setStyleSheet("background-color: #CBA6F7;")
         btn_scan_car2.clicked.connect(lambda: self.simulate_scan('E5F6G7H8'))
         
@@ -251,16 +257,15 @@ class ParkingDashboard(QMainWindow):
     def setup_management_tab(self):
         layout = QHBoxLayout()
         left_panel = QVBoxLayout()
-        left_panel.addWidget(QLabel("Database management", font=QFont("Segoe UI", 12, QFont.Weight.Bold)))
+        left_panel.addWidget(QLabel("Database Management", font=QFont("Segoe UI", 12, QFont.Weight.Bold)))
         
         form_layout = QFormLayout()
 
-        # ส่วนช่อง UID + ปุ่มกดรอรับค่าจาก ESP32 ผ่าน MQTT
         uid_input_layout = QHBoxLayout()
         self.input_uid = QLineEdit()
-        self.input_uid.setPlaceholderText("Fill UID or tap NTAG")
+        self.input_uid.setPlaceholderText("Enter UID or tap NTAG")
         
-        self.btn_read_ntag = QPushButton("📡 แตะ NTAG เพื่ออ่าน UID")
+        self.btn_read_ntag = QPushButton("📡 Tap NTAG to Read UID")
         self.btn_read_ntag.setStyleSheet("background-color: #FAB387; color: #11111B;")
         self.btn_read_ntag.clicked.connect(self.toggle_ntag_read_mode)
 
@@ -268,22 +273,22 @@ class ParkingDashboard(QMainWindow):
         uid_input_layout.addWidget(self.btn_read_ntag)
 
         self.input_plate = QLineEdit()
-        self.input_plate.setPlaceholderText("Fill license plate")
+        self.input_plate.setPlaceholderText("Enter license plate")
         self.input_type = QLineEdit()
         self.input_type.setText("regular")
         
         form_layout.addRow("UID:", uid_input_layout)
-        form_layout.addRow("License plate:", self.input_plate)
-        form_layout.addRow("Type:", self.input_type)
+        form_layout.addRow("License Plate:", self.input_plate)
+        form_layout.addRow("Member Type:", self.input_type)
         left_panel.addLayout(form_layout)
         
-        btn_create = QPushButton("Add new member")
+        btn_create = QPushButton("Add New Member")
         btn_create.clicked.connect(self.handle_create)
-        btn_update = QPushButton("Update data")
+        btn_update = QPushButton("Update Data")
         btn_update.clicked.connect(self.handle_update)
-        btn_delete = QPushButton("Delete member")
+        btn_delete = QPushButton("Delete Member")
         btn_delete.clicked.connect(self.handle_delete)
-        btn_read = QPushButton("Refresh table")
+        btn_read = QPushButton("Refresh Table")
         btn_read.clicked.connect(self.handle_read)
 
         left_panel.addWidget(btn_create)
@@ -307,25 +312,170 @@ class ParkingDashboard(QMainWindow):
         layout.addLayout(right_panel, stretch=2) 
         self.tab_management.setLayout(layout)
 
+    def setup_logs_tab(self):
+        layout = QVBoxLayout()
+
+        top_layout = QHBoxLayout()
+        title = QLabel("PARKING LOGS HISTORY")
+        title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        title.setStyleSheet("color: #89B4FA;")
+
+        # Search bar for filtering UID or License Plate
+        self.input_log_search = QLineEdit()
+        self.input_log_search.setPlaceholderText("Filter Plate / UID...")
+        self.input_log_search.textChanged.connect(self.handle_read_logs)
+
+        # Dropdown filter for parking status
+        self.combo_status_filter = QComboBox()
+        self.combo_status_filter.addItems(["All Status", "parked", "paid", "completed"])
+        self.combo_status_filter.currentTextChanged.connect(self.handle_read_logs)
+
+        btn_refresh_logs = QPushButton("🔄 Refresh")
+        btn_refresh_logs.setFixedWidth(100)
+        btn_refresh_logs.clicked.connect(self.handle_read_logs)
+
+        # Export CSV Button
+        btn_export_csv = QPushButton("📥 Export CSV")
+        btn_export_csv.setStyleSheet("background-color: #A6E3A1; color: #11111B;")
+        btn_export_csv.setFixedWidth(120)
+        btn_export_csv.clicked.connect(self.handle_export_csv)
+
+        top_layout.addWidget(title)
+        top_layout.addWidget(self.input_log_search)
+        top_layout.addWidget(self.combo_status_filter)
+        top_layout.addWidget(btn_refresh_logs)
+        top_layout.addWidget(btn_export_csv)
+
+        self.table_logs = QTableWidget()
+        self.table_logs.setColumnCount(7)
+        self.table_logs.setHorizontalHeaderLabels([
+            "Log ID", "UID", "License Plate", "Time In", "Time Out", "Status", "Fee (THB)"
+        ])
+        self.table_logs.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+
+        layout.addLayout(top_layout)
+        layout.addWidget(self.table_logs)
+        self.tab_logs.setLayout(layout)
+
+    def handle_read_logs(self):
+        try:
+            search_query = self.input_log_search.text().strip() if hasattr(self, 'input_log_search') else ""
+            status_filter = self.combo_status_filter.currentText() if hasattr(self, 'combo_status_filter') else "All Status"
+
+            sql = """
+                SELECT 
+                    l.log_id, 
+                    l.uid, 
+                    COALESCE(m.license_plate, 'Unregistered') AS license_plate, 
+                    l.time_in, 
+                    l.time_out, 
+                    l.status, 
+                    l.fee_calculated 
+                FROM parking_logs l
+                LEFT JOIN members m ON l.uid = m.uid
+                WHERE 1=1
+            """
+            params = []
+
+            if search_query:
+                sql += " AND (l.uid LIKE ? OR m.license_plate LIKE ?)"
+                params.extend([f"%{search_query}%", f"%{search_query}%"])
+
+            if status_filter != "All Status":
+                sql += " AND l.status = ?"
+                params.append(status_filter)
+
+            sql += " ORDER BY l.log_id DESC"
+
+            self.parking.cursor.execute(sql, params)
+            logs_data = self.parking.cursor.fetchall()
+
+            self.table_logs.setRowCount(len(logs_data))
+            for row_idx, row_data in enumerate(logs_data):
+                for col_idx, item_data in enumerate(row_data):
+                    value = str(item_data) if item_data is not None else "-"
+                    if col_idx == 6 and item_data is not None:
+                        value = f"{float(item_data):.2f}"
+                    item = QTableWidgetItem(value)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table_logs.setItem(row_idx, col_idx, item)
+
+        except Exception as e:
+            self.log_message(f"Error reading parking logs: {e}")
+
+    def handle_export_csv(self):
+        try:
+            file_path, _ = QFileDialog.getSaveFileName(
+                self, 
+                "Export Parking Logs to CSV", 
+                "parking_logs.csv", 
+                "CSV Files (*.csv);;All Files (*)"
+            )
+            
+            if not file_path:
+                return
+
+            search_query = self.input_log_search.text().strip()
+            status_filter = self.combo_status_filter.currentText()
+
+            sql = """
+                SELECT 
+                    l.log_id, 
+                    l.uid, 
+                    COALESCE(m.license_plate, 'Unregistered') AS license_plate, 
+                    l.time_in, 
+                    l.time_out, 
+                    l.status, 
+                    l.fee_calculated 
+                FROM parking_logs l
+                LEFT JOIN members m ON l.uid = m.uid
+                WHERE 1=1
+            """
+            params = []
+
+            if search_query:
+                sql += " AND (l.uid LIKE ? OR m.license_plate LIKE ?)"
+                params.extend([f"%{search_query}%", f"%{search_query}%"])
+
+            if status_filter != "All Status":
+                sql += " AND l.status = ?"
+                params.append(status_filter)
+
+            sql += " ORDER BY l.log_id DESC"
+
+            self.parking.cursor.execute(sql, params)
+            logs_data = self.parking.cursor.fetchall()
+
+            with open(file_path, mode='w', newline='', encoding='utf-8-sig') as file:
+                writer = csv.writer(file)
+                writer.writerow(["Log ID", "UID", "License Plate", "Time In", "Time Out", "Status", "Fee (THB)"])
+                for row in logs_data:
+                    writer.writerow(row)
+
+            self.log_message(f"✅ [EXPORT SUCCESS] Parking logs exported to: {file_path}")
+
+        except Exception as e:
+            self.log_message(f"❌ Error exporting CSV: {e}")
+
     def toggle_ntag_read_mode(self):
         self.is_reading_ntag = not self.is_reading_ntag
         if self.is_reading_ntag:
-            self.btn_read_ntag.setText("Waitng for NTAG...")
+            self.btn_read_ntag.setText("⌛ Waiting for NTAG on ESP32...")
             self.btn_read_ntag.setStyleSheet("background-color: #F9E2AF; color: #11111B;")
-            self.log_message("[NTAG READ MODE] Please scan NTAG...")
+            self.log_message("📡 [NTAG READ MODE] Please tap NTAG on ESP32 reader...")
         else:
-            self.btn_read_ntag.setText("Scan NTAG for UID")
+            self.btn_read_ntag.setText("📡 Tap NTAG to Read UID")
             self.btn_read_ntag.setStyleSheet("background-color: #FAB387; color: #11111B;")
-            self.log_message("Cancel NTAG reading")
+            self.log_message("❌ [NTAG READ MODE] NTAG read mode cancelled")
 
     def process_scan(self, uid):
         if self.is_reading_ntag:
             self.input_uid.setText(uid)
             self.is_reading_ntag = False
-            self.btn_read_ntag.setText("Scan NTAG for UID")
+            self.btn_read_ntag.setText("📡 Tap NTAG to Read UID")
             self.btn_read_ntag.setStyleSheet("background-color: #FAB387; color: #11111B;")
             self.tabs.setCurrentIndex(1)
-            self.log_message(f"[NTAG CAPTURED] UID: {uid}")
+            self.log_message(f"✅ [NTAG CAPTURED] Retrieved UID: {uid} from ESP32 successfully")
             return
 
         self.log_message(f"\nNFC read: {uid}")
@@ -355,7 +505,7 @@ class ParkingDashboard(QMainWindow):
 
             elif current_status is None or current_status == 'completed':
                 scan_result_message = self.parking.handle_scan(uid)
-                self.log_message(f"[ENTRY SCAN] {scan_result_message}")
+                self.log_message(f"🚘 [ENTRY SCAN] {scan_result_message}")
                 self.update_image(uid)
                 self.send_user_status(uid)
 
@@ -364,6 +514,8 @@ class ParkingDashboard(QMainWindow):
                 self.plate_label.setText(f"PLEASE PAY FIRST!\n{uid}")
                 self.plate_label.setStyleSheet("background-color: #F38BA8; color: #11111B; border-radius: 10px; padding: 15px;")
                 self.send_user_status(uid)
+
+            self.handle_read_logs()
 
         except Exception as e:
             self.log_message(f"Error in process_scan: {e}")
@@ -382,11 +534,12 @@ class ParkingDashboard(QMainWindow):
             self.parking.cursor.execute(query, (amount, uid))
             self.parking.conn.commit()
 
-            self.log_message(f"💳 [PAYMENT SUCCESS] UID: {uid} Paid ฿{amount:.2f} -> STATUS: PAID (Waiting for NFC Exit Scan)")
+            self.log_message(f"💳 [PAYMENT SUCCESS] UID: {uid} Paid THB {amount:.2f} -> STATUS: PAID (Waiting for NFC Exit Scan)")
             self.plate_label.setText(f"PAID: {uid}\nScan NFC at Exit Gate")
             self.plate_label.setStyleSheet("background-color: #F9E2AF; color: #11111B; border-radius: 10px; padding: 15px;")
             
             self.send_user_status(uid)
+            self.handle_read_logs()
 
         except Exception as e:
             self.log_message(f"Error processing payment: {e}")
@@ -407,18 +560,18 @@ class ParkingDashboard(QMainWindow):
             response_topic = f"parking/search/response/{request_id}"
 
             if row:
-                uid, plate, status = row[0], row[1] if row[1] else "กท-1234", row[2]
+                uid, plate, status = row[0], row[1] if row[1] else "BKK-1234", row[2]
                 payload = json.dumps({
                     "found": True,
                     "uid": uid,
                     "plate": plate,
                     "status": status
                 })
-                self.log_message(f"[SEARCH MATCH] Query: '{search_query}' -> Found UID: {uid} ({plate})")
+                self.log_message(f"🔍 [SEARCH MATCH] Query: '{search_query}' -> Found UID: {uid} ({plate})")
             else:
                 payload = json.dumps({
                     "found": False,
-                    "message": f"License plate '{search_query}' not found"
+                    "message": f"Vehicle with plate or UID '{search_query}' not found in the parking system."
                 })
                 self.log_message(f"🔍 [SEARCH NOT FOUND] Query: '{search_query}'")
 
@@ -438,13 +591,13 @@ class ParkingDashboard(QMainWindow):
             self.parking.cursor.execute(query, (uid,))
             row = self.parking.cursor.fetchone()
             
-            plate = 'กท-1234'
+            plate = 'BKK-1234'
             status = 'parked'
             time_in = None
             img_base64 = None
 
             if row:
-                plate = row[0] if row[0] else 'กท-1234'
+                plate = row[0] if row[0] else 'BKK-1234'
                 status = row[1] if row[1] else 'parked'
                 time_in = str(row[2]) if row[2] else None
                 img_path = row[3] if len(row) > 3 and row[3] else None
@@ -481,7 +634,7 @@ class ParkingDashboard(QMainWindow):
                 "time_in": time_in,
                 "image_base64": img_base64,
                 "history": history_list,
-                "zone": "ชั้น 2 - โซน B14"
+                "zone": "Floor 2 - Zone B14"
             })
 
             self.pub_client.publish(f"parking/status/{uid}", payload)
