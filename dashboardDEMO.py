@@ -17,6 +17,7 @@ class MQTTListenerThread(QThread):
     card_scanned = pyqtSignal(str)
     status_requested = pyqtSignal(str)
     gate_exit_requested = pyqtSignal(str, float)
+    search_requested = pyqtSignal(str, str)  # (query, requestId)
     log_msg = pyqtSignal(str)
 
     def __init__(self, broker_address="broker.emqx.io"):
@@ -31,6 +32,7 @@ class MQTTListenerThread(QThread):
             self.client.subscribe("parking/entry/scan")
             self.client.subscribe("parking/request/status")
             self.client.subscribe("parking/gate/exit")
+            self.client.subscribe("parking/search/request")
         else:
             self.log_msg.emit(f"Fail to connect to MQTT (code: {rc})")
 
@@ -57,6 +59,15 @@ class MQTTListenerThread(QThread):
                     self.gate_exit_requested.emit(uid, amount)
             except Exception as e:
                 self.log_msg.emit(f"Exit payload parse error: {e}")
+        elif topic == "parking/search/request":
+            try:
+                data = json.loads(payload)
+                query = data.get("query", "")
+                request_id = data.get("requestId", "")
+                if query and request_id:
+                    self.search_requested.emit(query, request_id)
+            except Exception as e:
+                self.log_msg.emit(f"Search parse error: {e}")
 
     def run(self):
         self.client.on_connect = self.on_connect
@@ -166,6 +177,7 @@ class ParkingDashboard(QMainWindow):
         self.mqtt_thread.card_scanned.connect(self.process_scan)
         self.mqtt_thread.status_requested.connect(self.send_user_status)
         self.mqtt_thread.gate_exit_requested.connect(self.process_exit)
+        self.mqtt_thread.search_requested.connect(self.process_search)
         self.mqtt_thread.log_msg.connect(self.log_message)
         self.mqtt_thread.start()
 
@@ -299,6 +311,43 @@ class ParkingDashboard(QMainWindow):
         except Exception as e:
             self.log_message(f"Error in process_scan: {e}")
 
+    def process_search(self, search_query, request_id):
+        """ ค้นหา UID จากทะเบียนรถ หรือ UID ล่าสุดในฐานข้อมูล """
+        try:
+            query_str = f"%{search_query}%"
+            sql = """
+                SELECT l.uid, m.license_plate, l.status
+                FROM parking_logs l
+                LEFT JOIN members m ON l.uid = m.uid
+                WHERE (m.license_plate LIKE ? OR l.uid LIKE ?)
+                ORDER BY l.log_id DESC LIMIT 1
+            """
+            self.parking.cursor.execute(sql, (query_str, query_str))
+            row = self.parking.cursor.fetchone()
+
+            response_topic = f"parking/search/response/{request_id}"
+
+            if row:
+                uid, plate, status = row[0], row[1] if row[1] else "กท-1234", row[2]
+                payload = json.dumps({
+                    "found": True,
+                    "uid": uid,
+                    "plate": plate,
+                    "status": status
+                })
+                self.log_message(f"🔍 [SEARCH MATCH] Query: '{search_query}' -> Found UID: {uid} ({plate})")
+            else:
+                payload = json.dumps({
+                    "found": False,
+                    "message": f"ไม่พบข้อมูลรถทะเบียน '{search_query}' ในระบบจอดรถขณะนี้"
+                })
+                self.log_message(f"🔍 [SEARCH NOT FOUND] Query: '{search_query}'")
+
+            self.pub_client.publish(response_topic, payload)
+
+        except Exception as e:
+            self.log_message(f"Error processing search: {e}")
+
     def send_user_status(self, uid):
         """ ดึงข้อมูลเวลา, รูปภาพ, และประวัติย้อนหลัง 5 รายการจาก SQLite ส่งไป Next.js """
         try:
@@ -329,7 +378,6 @@ class ParkingDashboard(QMainWindow):
                     except Exception as img_err:
                         self.log_message(f"Image base64 read error: {img_err}")
 
-            # ดึงประวัติการจอดรถย้อนหลัง 5 รายการล่าสุด
             self.parking.cursor.execute("""
                 SELECT time_in, time_out, status, fee_calculated 
                 FROM parking_logs 
