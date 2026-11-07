@@ -100,7 +100,7 @@ class ParkingDashboard(QMainWindow):
         self.parking = ParkingSys('parking.db')
         self.parking.create_tables()
 
-        self.parking.register_member('A1B2C3D4', 'BKK-1234')
+        self.parking.register_member('A1B2C3D4', '5กข-2662')
         self.parking.register_member('E5F6G7H8', 'SK-9999', 'vip')
 
         # Parking Lot Capacity Settings
@@ -116,7 +116,7 @@ class ParkingDashboard(QMainWindow):
             print(f"MQTT Pub Connect Error: {e}")
 
         self.setWindowTitle("SMART PARKING TERMINAL")
-        self.resize(1150, 700)
+        self.resize(1150, 720)
 
         self.setStyleSheet("""
             QMainWindow, QWidget#tab_bg { background-color: #1E1E2E; }
@@ -174,17 +174,23 @@ class ParkingDashboard(QMainWindow):
 
         self.tab_logs = QWidget()
         self.tab_logs.setObjectName("tab_bg")
+
+        self.tab_summary = QWidget()
+        self.tab_summary.setObjectName("tab_bg")
         
         self.tabs.addTab(self.tab_dashboard, "🎥 Live Dashboard")
         self.tabs.addTab(self.tab_management, "⚙️ Database Management")
         self.tabs.addTab(self.tab_logs, "📋 Parking Logs")
+        self.tabs.addTab(self.tab_summary, "📊 Executive Summary")
 
         self.setup_dashboard_tab()
         self.setup_management_tab()
         self.setup_logs_tab()
+        self.setup_summary_tab()
     
         self.handle_read()
         self.handle_read_logs()
+        self.handle_read_summary()
         self.update_capacity_display()
 
         self.log_message("SYSTEM INITIALIZED. READY.")
@@ -200,7 +206,6 @@ class ParkingDashboard(QMainWindow):
     def setup_dashboard_tab(self):
         container_layout = QVBoxLayout()
 
-        # --- Top Capacity Status Cards ---
         capacity_layout = QHBoxLayout()
 
         self.card_total = QLabel("TOTAL SLOTS\n50")
@@ -232,7 +237,6 @@ class ParkingDashboard(QMainWindow):
         capacity_layout.addWidget(self.card_available)
         container_layout.addLayout(capacity_layout)
 
-        # --- Main Live Split View ---
         main_layout = QHBoxLayout()
         left_layout = QVBoxLayout()
 
@@ -296,7 +300,6 @@ class ParkingDashboard(QMainWindow):
         self.tab_dashboard.setLayout(container_layout)
 
     def update_capacity_display(self):
-        """ Calculate & Update capacity UI cards and broadcast via MQTT """
         try:
             self.parking.cursor.execute("SELECT COUNT(*) FROM parking_logs WHERE status = 'parked'")
             parked_count = self.parking.cursor.fetchone()[0]
@@ -318,7 +321,6 @@ class ParkingDashboard(QMainWindow):
                     border-radius: 10px; padding: 10px; margin-bottom: 5px; font-weight: bold;
                 """)
 
-            # Broadcast capacity data via MQTT
             capacity_payload = json.dumps({
                 "total": self.total_capacity,
                 "parked": parked_count,
@@ -430,6 +432,157 @@ class ParkingDashboard(QMainWindow):
         layout.addWidget(self.table_logs)
         self.tab_logs.setLayout(layout)
 
+    def setup_summary_tab(self):
+        """ Setup Executive Summary & KPIs Tab """
+        layout = QVBoxLayout()
+
+        header_layout = QHBoxLayout()
+        title = QLabel("EXECUTIVE SUMMARY & KPIs")
+        title.setFont(QFont("Segoe UI", 14, QFont.Weight.Bold))
+        title.setStyleSheet("color: #F9E2AF;")
+
+        btn_refresh_summary = QPushButton("🔄 Refresh Analytics")
+        btn_refresh_summary.setFixedWidth(160)
+        btn_refresh_summary.clicked.connect(self.handle_read_summary)
+
+        header_layout.addWidget(title)
+        header_layout.addStretch()
+        header_layout.addWidget(btn_refresh_summary)
+        layout.addLayout(header_layout)
+
+        # KPI Cards Row
+        kpi_layout = QHBoxLayout()
+
+        self.kpi_revenue = QLabel("TODAY'S REVENUE\nTHB 0.00")
+        self.kpi_revenue.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.kpi_revenue.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self.kpi_revenue.setStyleSheet("background-color: #313244; color: #A6E3A1; border-radius: 12px; padding: 15px;")
+
+        self.kpi_today_cars = QLabel("TODAY'S VEHICLES\n0 Cars")
+        self.kpi_today_cars.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.kpi_today_cars.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self.kpi_today_cars.setStyleSheet("background-color: #313244; color: #89B4FA; border-radius: 12px; padding: 15px;")
+
+        self.kpi_occupancy_rate = QLabel("OCCUPANCY RATE\n0.0%")
+        self.kpi_occupancy_rate.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.kpi_occupancy_rate.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self.kpi_occupancy_rate.setStyleSheet("background-color: #313244; color: #FAB387; border-radius: 12px; padding: 15px;")
+
+        self.kpi_avg_duration = QLabel("AVG. STAY DURATION\n0.0 Hours")
+        self.kpi_avg_duration.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.kpi_avg_duration.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        self.kpi_avg_duration.setStyleSheet("background-color: #313244; color: #CBA6F7; border-radius: 12px; padding: 15px;")
+
+        kpi_layout.addWidget(self.kpi_revenue)
+        kpi_layout.addWidget(self.kpi_today_cars)
+        kpi_layout.addWidget(self.kpi_occupancy_rate)
+        kpi_layout.addWidget(self.kpi_avg_duration)
+        layout.addLayout(kpi_layout)
+
+        # Breakdown Table Header
+        table_title = QLabel("TODAY'S USAGE BREAKDOWN BY MEMBER TYPE")
+        table_title.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        table_title.setStyleSheet("color: #CDD6F4; margin-top: 15px;")
+        layout.addWidget(table_title)
+
+        # Breakdown Table
+        self.table_summary_breakdown = QTableWidget()
+        self.table_summary_breakdown.setColumnCount(4)
+        self.table_summary_breakdown.setHorizontalHeaderLabels([
+            "Member Type", "Total Vehicles Today", "Percentage (%)", "Total Revenue (THB)"
+        ])
+        self.table_summary_breakdown.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.table_summary_breakdown)
+
+        self.tab_summary.setLayout(layout)
+
+    def handle_read_summary(self):
+        """ Calculate & Render Executive Summary KPIs """
+        try:
+            today_str = datetime.datetime.now().strftime('%Y-%m-%d')
+
+            # 1. Today's Revenue
+            sql_rev = """
+                SELECT COALESCE(SUM(fee_calculated), 0) 
+                FROM parking_logs 
+                WHERE (status = 'paid' OR status = 'completed') 
+                AND date(time_in) = ?
+            """
+            self.parking.cursor.execute(sql_rev, (today_str,))
+            today_revenue = self.parking.cursor.fetchone()[0]
+            self.kpi_revenue.setText(f"TODAY'S REVENUE\nTHB {float(today_revenue):,.2f}")
+
+            # 2. Total Vehicles Today
+            sql_cars = "SELECT COUNT(*) FROM parking_logs WHERE date(time_in) = ?"
+            self.parking.cursor.execute(sql_cars, (today_str,))
+            today_cars = self.parking.cursor.fetchone()[0]
+            self.kpi_today_cars.setText(f"TODAY'S VEHICLES\n{today_cars} Cars")
+
+            # 3. Occupancy Rate
+            sql_parked = "SELECT COUNT(*) FROM parking_logs WHERE status = 'parked'"
+            self.parking.cursor.execute(sql_parked)
+            current_parked = self.parking.cursor.fetchone()[0]
+            occ_rate = (current_parked / self.total_capacity) * 100 if self.total_capacity > 0 else 0.0
+            self.kpi_occupancy_rate.setText(f"OCCUPANCY RATE\n{occ_rate:.1f}% ({current_parked}/{self.total_capacity})")
+
+            # 4. Avg Stay Duration (completed sessions today)
+            sql_dur = "SELECT time_in, time_out FROM parking_logs WHERE status = 'completed' AND date(time_in) = ?"
+            self.parking.cursor.execute(sql_dur, (today_str,))
+            durations = self.parking.cursor.fetchall()
+            
+            fmt = '%Y-%m-%d %H:%M:%S'
+            total_hours = 0.0
+            valid_dur_count = 0
+            for d in durations:
+                if d[0] and d[1]:
+                    try:
+                        t_in = datetime.datetime.strptime(d[0], fmt)
+                        t_out = datetime.datetime.strptime(d[1], fmt)
+                        diff_hours = (t_out - t_in).total_seconds() / 3600.0
+                        total_hours += diff_hours
+                        valid_dur_count += 1
+                    except Exception:
+                        pass
+
+            avg_dur = total_hours / valid_dur_count if valid_dur_count > 0 else 0.0
+            self.kpi_avg_duration.setText(f"AVG. STAY DURATION\n{avg_dur:.2f} Hours")
+
+            # 5. Member Type Breakdown Table
+            sql_breakdown = """
+                SELECT 
+                    COALESCE(m.member_type, 'unregistered') AS member_type,
+                    COUNT(l.log_id) AS vehicle_count,
+                    COALESCE(SUM(l.fee_calculated), 0) AS total_fee
+                FROM parking_logs l
+                LEFT JOIN members m ON l.uid = m.uid
+                WHERE date(l.time_in) = ?
+                GROUP BY COALESCE(m.member_type, 'unregistered')
+            """
+            self.parking.cursor.execute(sql_breakdown, (today_str,))
+            breakdown_rows = self.parking.cursor.fetchall()
+
+            self.table_summary_breakdown.setRowCount(len(breakdown_rows))
+            for row_idx, row_data in enumerate(breakdown_rows):
+                m_type = str(row_data[0]).upper()
+                v_count = row_data[1]
+                t_fee = float(row_data[2])
+                pct = (v_count / today_cars * 100) if today_cars > 0 else 0.0
+
+                items = [
+                    m_type,
+                    str(v_count),
+                    f"{pct:.1f}%",
+                    f"THB {t_fee:,.2f}"
+                ]
+
+                for col_idx, text in enumerate(items):
+                    item = QTableWidgetItem(text)
+                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                    self.table_summary_breakdown.setItem(row_idx, col_idx, item)
+
+        except Exception as e:
+            self.log_message(f"Error calculating summary KPIs: {e}")
+
     def handle_read_logs(self):
         try:
             search_query = self.input_log_search.text().strip() if hasattr(self, 'input_log_search') else ""
@@ -474,6 +627,7 @@ class ParkingDashboard(QMainWindow):
                     self.table_logs.setItem(row_idx, col_idx, item)
 
             self.update_capacity_display()
+            self.handle_read_summary()
 
         except Exception as e:
             self.log_message(f"Error reading parking logs: {e}")
@@ -579,7 +733,6 @@ class ParkingDashboard(QMainWindow):
                 self.send_user_status(uid)
 
             elif current_status is None or current_status == 'completed':
-                # --- PARKING CAPACITY CHECK BEFORE ENTRY ---
                 self.parking.cursor.execute("SELECT COUNT(*) FROM parking_logs WHERE status = 'parked'")
                 currently_parked = self.parking.cursor.fetchone()[0]
 
@@ -602,6 +755,7 @@ class ParkingDashboard(QMainWindow):
                 self.send_user_status(uid)
 
             self.handle_read_logs()
+            self.handle_read_summary()
             self.update_capacity_display()
 
         except Exception as e:
@@ -627,6 +781,7 @@ class ParkingDashboard(QMainWindow):
             
             self.send_user_status(uid)
             self.handle_read_logs()
+            self.handle_read_summary()
             self.update_capacity_display()
 
         except Exception as e:
