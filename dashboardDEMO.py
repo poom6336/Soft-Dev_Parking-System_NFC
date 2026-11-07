@@ -279,7 +279,7 @@ class ParkingDashboard(QMainWindow):
         self.log_text.setFont(QFont("Consolas", 10))
 
         btn_layout = QHBoxLayout()
-        btn_scan_car1 = QPushButton("Scan: BKK-1234")
+        btn_scan_car1 = QPushButton("Scan: 5กข-2662")
         btn_scan_car1.setStyleSheet("background-color: #CBA6F7;")
         btn_scan_car1.clicked.connect(lambda: self.simulate_scan('A1B2C3D4'))
 
@@ -803,7 +803,7 @@ class ParkingDashboard(QMainWindow):
             response_topic = f"parking/search/response/{request_id}"
 
             if row:
-                uid, plate, status = row[0], row[1] if row[1] else "BKK-1234", row[2]
+                uid, plate, status = row[0], row[1] if row[1] else "5กข-2662", row[2]
                 payload = json.dumps({
                     "found": True,
                     "uid": uid,
@@ -834,13 +834,13 @@ class ParkingDashboard(QMainWindow):
             self.parking.cursor.execute(query, (uid,))
             row = self.parking.cursor.fetchone()
             
-            plate = 'BKK-1234'
+            plate = '5กข-2662'
             status = 'parked'
             time_in = None
             img_base64 = None
 
             if row:
-                plate = row[0] if row[0] else 'BKK-1234'
+                plate = row[0] if row[0] else '5กข-2662'
                 status = row[1] if row[1] else 'parked'
                 time_in = str(row[2]) if row[2] else None
                 img_path = row[3] if len(row) > 3 and row[3] else None
